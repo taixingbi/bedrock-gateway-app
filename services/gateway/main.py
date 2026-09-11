@@ -17,6 +17,8 @@ from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 
 from .api.routes import build_router
+from .auth.devkeys import load_or_create_dev_keypair
+from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .config import Settings, load_settings
 from .inference.bedrock_client import BedrockClient, ConverseClient
 from .telemetry.logging import configure_logging, get_logger, log_event
@@ -25,9 +27,26 @@ from .telemetry.middleware import RequestContextMiddleware
 _logger = get_logger("gateway.main")
 
 
+def _build_default_token_verifier(settings: Settings) -> TokenVerifier:
+    if settings.oidc_jwks_url:
+        return JwksVerifier(
+            jwks_url=settings.oidc_jwks_url,
+            issuer=settings.oidc_issuer,
+            audience=settings.oidc_audience,
+            cache_ttl_s=settings.oidc_jwks_cache_ttl_s,
+        )
+    # No real OIDC provider configured -- local dev keypair (see
+    # auth/devkeys.py and scripts/generate_dev_token.py).
+    _private_pem, public_pem = load_or_create_dev_keypair(settings.dev_jwt_keypair_path)
+    return StaticKeyVerifier(
+        public_key_pem=public_pem, issuer=settings.oidc_issuer, audience=settings.oidc_audience
+    )
+
+
 def create_app(
     settings: Optional[Settings] = None,
     converse_client: Optional[ConverseClient] = None,
+    token_verifier: Optional[TokenVerifier] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -38,8 +57,10 @@ def create_app(
             timeout_s=settings.bedrock_timeout_s,
             max_retries=settings.bedrock_max_retries,
         )
+    if token_verifier is None:
+        token_verifier = _build_default_token_verifier(settings)
 
-    routes = build_router(converse_client=converse_client, settings=settings)
+    routes = build_router(converse_client=converse_client, settings=settings, token_verifier=token_verifier)
 
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))

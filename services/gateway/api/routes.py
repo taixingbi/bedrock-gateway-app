@@ -16,6 +16,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from .. import pipeline
+from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
 from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError, ConverseClient
 from ..telemetry.logging import get_logger, log_event
@@ -33,12 +35,22 @@ _ERROR_STATUS_MAP = {
 _DEFAULT_ERROR_STATUS = (502, "UPSTREAM_ERROR")
 
 
-def build_router(*, converse_client: ConverseClient, settings: Settings) -> list[Route]:
+def build_router(
+    *, converse_client: ConverseClient, settings: Settings, token_verifier: TokenVerifier
+) -> list[Route]:
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
     async def chat(request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = pipeline.authenticate(
+                request.headers.get("authorization"), token_verifier=token_verifier
+            )
+            pipeline.authorize(identity, required_role=settings.chat_required_role)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
 
         try:
             body = await request.json()
@@ -68,6 +80,7 @@ def build_router(*, converse_client: ConverseClient, settings: Settings) -> list
             log_event(
                 _chat_logger, "ERROR", "chat request failed",
                 request_id=request_id, model=model_id, status=status_code,
+                tenant_id=identity.tenant_id,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
                 error=str(exc),
             )
@@ -77,11 +90,11 @@ def build_router(*, converse_client: ConverseClient, settings: Settings) -> list
             _chat_logger, "INFO", "chat request completed",
             request_id=request_id,
             model=model_id,
+            tenant_id=identity.tenant_id,
             # Fields below are placeholders until the corresponding milestone
-            # lands (M1 tenant identity, M2 policy plane, M3 guardrails,
-            # M4 cache/fallback, M13 streaming). Kept here so the schema
-            # doesn't change shape later -- see section 17 of the plan.
-            tenant_id=None,
+            # lands (M2 policy plane, M3 guardrails, M4 cache/fallback,
+            # M14 streaming). Kept here so the schema doesn't change shape
+            # later -- see section 17 of the plan.
             policy_epoch=None,
             guardrail_version=None,
             route_set=None,

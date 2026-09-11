@@ -44,6 +44,15 @@ class Settings:
     # Request handling
     max_input_chars: int
 
+    # M1 identity
+    oidc_issuer: str
+    oidc_audience: str
+    oidc_jwks_url: str  # empty -> fall back to the local dev keypair (see auth/devkeys.py)
+    oidc_jwks_cache_ttl_s: float
+    dev_jwt_keypair_path: str
+    chat_required_role: str
+    admin_required_role: str
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -59,4 +68,11 @@ def load_settings() -> Settings:
         service_name=os.environ.get("SERVICE_NAME", "gateway-api"),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         max_input_chars=_env_int("MAX_INPUT_CHARS", 32_000),
+        oidc_issuer=os.environ.get("OIDC_ISSUER", "https://dev-issuer.local/"),
+        oidc_audience=os.environ.get("OIDC_AUDIENCE", "bedrock-gateway"),
+        oidc_jwks_url=os.environ.get("OIDC_JWKS_URL", ""),
+        oidc_jwks_cache_ttl_s=_env_float("OIDC_JWKS_CACHE_TTL_S", 300.0),
+        dev_jwt_keypair_path=os.environ.get("DEV_JWT_KEYPAIR_PATH", ".dev/jwt_keypair.json"),
+        chat_required_role=os.environ.get("CHAT_REQUIRED_ROLE", "developer"),
+        admin_required_role=os.environ.get("ADMIN_REQUIRED_ROLE", "platform_admin"),
     )

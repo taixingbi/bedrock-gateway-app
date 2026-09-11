@@ -6,8 +6,8 @@ This file just tracks milestone status against that plan's section 25.
 
 | Milestone | Build | Exit criteria | Status |
 |---|---|---|---|
-| M0 — Walking Skeleton | ECS + `/chat` + Bedrock + minimal telemetry | End-to-end inference works | **Done** (this commit) |
-| M1 — Identity | OIDC/JWT + RBAC/ABAC + tenant resolution | Tenant identity trustworthy | Not started |
+| M0 — Walking Skeleton | ECS + `/chat` + Bedrock + minimal telemetry | End-to-end inference works | **Done** |
+| M1 — Identity | OIDC/JWT + RBAC/ABAC + tenant resolution | Tenant identity trustworthy | **Done** |
 | M2 — Policy Plane | Tenant config + policy epoch + kill switch + push invalidation + bounded TTL | Policy changes have bounded propagation | Not started |
 | M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | Not started |
 | M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | Not started |
@@ -54,3 +54,49 @@ later. The seams are intentional:
   in as more constructor args, not a rewrite.
 - The telemetry schema is already the full one, just mostly `null` — no
   future migration of log field names.
+
+## What M1 actually is
+
+`services/gateway/auth/`:
+
+- `jwt_verifier.py` — `TokenVerifier` Protocol (the same seam pattern as
+  `ConverseClient`) with two implementations: `JwksVerifier` (real OIDC —
+  fetches and caches the provider's JWKS by `kid`, verifies RS256
+  signature/issuer/audience/expiry) and `StaticKeyVerifier` (one fixed
+  public key, no network — local dev and tests).
+- `identity.py` — `Identity` (sub, tenant_id, application_id, roles)
+  built **only** from verified claims. `tenant_id` never comes from a
+  header; plan section 5 calls out `X-Tenant-ID` spoofing explicitly as
+  the anti-pattern to avoid, and `test_auth.py` has a test proving a
+  spoofed header has no effect.
+- `rbac.py` — `require_role` / `require_any_role`.
+- `devkeys.py` — generates/persists a local RSA keypair
+  (`.dev/jwt_keypair.json`, gitignored) so the running server and
+  `scripts/generate_dev_token.py` agree on a key without a real IdP.
+
+`services/gateway/pipeline.py` is new: `authenticate()` and `authorize()`
+are the first two stages of the plan section 2 request pipeline, called
+from `api/routes.py`'s `chat()` handler before the request body is even
+parsed. This module is where M2–M4's remaining stages (kill switch,
+policy snapshot, rate limit, guardrails, cache, certified router) get
+added, keeping `routes.py` a thin HTTP adapter.
+
+`main.py`'s `create_app()` gained a `token_verifier` parameter (same
+optional-injection pattern as `converse_client`); when omitted it builds
+a `JwksVerifier` if `OIDC_JWKS_URL` is set, else a dev `StaticKeyVerifier`.
+
+`/v1/chat` now requires `Authorization: Bearer <token>` with a valid,
+unexpired, correctly-issued/audienced token carrying the
+`CHAT_REQUIRED_ROLE` role (default `developer`) — 401 if missing/invalid,
+403 if the role is missing. `/healthz` stays unauthenticated (ALB liveness
+probe). `tenant_id` in the telemetry log is now the real value from the
+token, no longer a placeholder.
+
+## What M1 deliberately does NOT do
+
+ABAC beyond a role check, tenant state/kill-switch, policy epoch, quota,
+guardrails, cache, certified routing/fallback, streaming — all still
+M2–M4. No token refresh/introspection endpoint (out of scope for a
+gateway that only verifies tokens issued elsewhere). No admin API yet
+(lands with the kill switch in M2, since `PUT .../state` is the first
+admin action that needs one).

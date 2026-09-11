@@ -5,13 +5,19 @@ from starlette.testclient import TestClient
 from ..config import load_settings
 from ..inference.bedrock_client import BedrockInvocationError
 from ..main import create_app
+from .auth_fixtures import auth_header, get_auth_fixture
 from .fakes import FakeConverseClient
 
 
 def _client(fake: FakeConverseClient) -> TestClient:
     settings = load_settings()
-    app = create_app(settings=settings, converse_client=fake)
+    fixture = get_auth_fixture()
+    app = create_app(settings=settings, converse_client=fake, token_verifier=fixture.verifier)
     return TestClient(app)
+
+
+def _auth_headers(**token_kwargs) -> dict:
+    return auth_header(get_auth_fixture().token(**token_kwargs))
 
 
 class ChatEndpointTests(unittest.TestCase):
@@ -22,6 +28,7 @@ class ChatEndpointTests(unittest.TestCase):
         resp = client.post(
             "/v1/chat",
             json={"messages": [{"role": "user", "content": "hello"}]},
+            headers=_auth_headers(),
         )
 
         self.assertEqual(resp.status_code, 200)
@@ -41,6 +48,7 @@ class ChatEndpointTests(unittest.TestCase):
                 "model": "anthropic.claude-3-haiku",
                 "messages": [{"role": "user", "content": "hi"}],
             },
+            headers=_auth_headers(),
         )
 
         self.assertEqual(fake.calls[0]["model_id"], "anthropic.claude-3-haiku")
@@ -48,10 +56,15 @@ class ChatEndpointTests(unittest.TestCase):
     def test_default_model_used_when_omitted(self):
         fake = FakeConverseClient()
         settings = load_settings()
-        app = create_app(settings=settings, converse_client=fake)
+        fixture = get_auth_fixture()
+        app = create_app(settings=settings, converse_client=fake, token_verifier=fixture.verifier)
         client = TestClient(app)
 
-        client.post("/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        client.post(
+            "/v1/chat",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers=_auth_headers(),
+        )
 
         self.assertEqual(fake.calls[0]["model_id"], settings.bedrock_model_id)
 
@@ -62,7 +75,7 @@ class ChatEndpointTests(unittest.TestCase):
         resp = client.post(
             "/v1/chat",
             json={"messages": [{"role": "user", "content": "hi"}]},
-            headers={"x-request-id": "req-fixed-123"},
+            headers={**_auth_headers(), "x-request-id": "req-fixed-123"},
         )
 
         self.assertEqual(resp.headers["x-request-id"], "req-fixed-123")
@@ -71,7 +84,7 @@ class ChatEndpointTests(unittest.TestCase):
     def test_empty_messages_is_rejected(self):
         client = _client(FakeConverseClient())
 
-        resp = client.post("/v1/chat", json={"messages": []})
+        resp = client.post("/v1/chat", json={"messages": []}, headers=_auth_headers())
 
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"]["code"], "INVALID_REQUEST")
@@ -82,6 +95,7 @@ class ChatEndpointTests(unittest.TestCase):
         resp = client.post(
             "/v1/chat",
             json={"messages": [{"role": "assistant", "content": "hi"}]},
+            headers=_auth_headers(),
         )
 
         self.assertEqual(resp.status_code, 400)
@@ -92,7 +106,7 @@ class ChatEndpointTests(unittest.TestCase):
         resp = client.post(
             "/v1/chat",
             content=b"not json",
-            headers={"content-type": "application/json"},
+            headers={**_auth_headers(), "content-type": "application/json"},
         )
 
         self.assertEqual(resp.status_code, 400)
@@ -106,7 +120,11 @@ class ChatEndpointTests(unittest.TestCase):
         )
         client = _client(fake)
 
-        resp = client.post("/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        resp = client.post(
+            "/v1/chat",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers=_auth_headers(),
+        )
 
         self.assertEqual(resp.status_code, 429)
         self.assertEqual(resp.json()["error"]["code"], "UPSTREAM_THROTTLED")
@@ -117,7 +135,11 @@ class ChatEndpointTests(unittest.TestCase):
         )
         client = _client(fake)
 
-        resp = client.post("/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        resp = client.post(
+            "/v1/chat",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers=_auth_headers(),
+        )
 
         self.assertEqual(resp.status_code, 502)
         self.assertEqual(resp.json()["error"]["code"], "UPSTREAM_ERROR")
