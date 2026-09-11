@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests (services/gateway)
+        run: python -m unittest discover -s services/gateway/tests -t .
+
+      - name: Run load/chaos scenario tests (M6)
+        run: python -m unittest discover -s loadtests -t .
+
+  docker:
+    name: Docker build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t gateway-api:ci .
+
+      - name: Run container
+        run: |
+          docker run -d --name gateway-api-ci -p 8080:8080 gateway-api:ci
+
+      - name: Wait for /healthz
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8080/healthz; then
+              echo "gateway is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway did not become healthy in time"
+          exit 1
+
+      - name: Container logs (always, for debugging)
+        if: always()
+        run: docker logs gateway-api-ci
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f gateway-api-ci

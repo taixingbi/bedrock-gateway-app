@@ -153,6 +153,9 @@ def create_app(
 try:
     app = create_app()
 except Exception:  # pragma: no cover - boto3/creds not available at import time
+    import traceback
+
+    traceback.print_exc()  # a silently-None app just 500s with no clue why -- print the real cause
     app = None
 
 

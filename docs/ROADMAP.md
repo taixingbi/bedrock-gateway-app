@@ -399,3 +399,17 @@ unless `OIDC_JWKS_URL` is configured against one), ML-grade guardrails
 Lifecycle), and M10 (Portal) are unstarted -- V1 is the walking, talking,
 safety-and-reliability-tested gateway; those are the rest of the
 platform in plan.md.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`: the unit
+suite and the M6 load/chaos scenarios on Python 3.11 and 3.12, plus a
+separate job that builds the Docker image and smoke-tests `/healthz`
+against a running container. That smoke test is the reason
+`Dockerfile` copies `policies/` (`FilePolicyStore`/`CertifiedRouter` need
+it at startup, added in M2/M4 but missed in the image until CI actually
+ran the container) and `chown`s `/app` to the non-root `app` user before
+switching to it (the dev-keypair fallback in `auth/devkeys.py` needs to
+write `.dev/jwt_keypair.json` under the working directory when no real
+`OIDC_JWKS_URL` is configured) -- both were real gaps a build-only check
+would not have caught.
