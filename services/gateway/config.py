@@ -73,8 +73,14 @@ def load_settings() -> Settings:
     return Settings(
         aws_region=os.environ.get("AWS_REGION", "us-east-1"),
         bedrock_model_id=os.environ.get(
+            # us. prefix = cross-region inference profile ID, required by
+            # newer Bedrock models instead of the bare model ID (confirmed
+            # against the account this was configured for -- account
+            # 646821141010, us-east-1). See docs/LOAD_TESTING.md and
+            # ROADMAP.md for how to find the right ID for other models/
+            # accounts (aws bedrock list-inference-profiles).
             "BEDROCK_MODEL_ID",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.amazon.nova-micro-v1:0",
         ),
         bedrock_timeout_s=_env_float("BEDROCK_TIMEOUT_S", 30.0),
         bedrock_max_retries=_env_int("BEDROCK_MAX_RETRIES", 2),

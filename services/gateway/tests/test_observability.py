@@ -27,7 +27,7 @@ def _policy(**overrides) -> TenantPolicy:
 
 class CostEstimationTests(unittest.TestCase):
     def test_known_model_uses_its_own_rates(self):
-        model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        model_id = "us.amazon.nova-micro-v1:0"
         rates = DEFAULT_PRICING[model_id]
         cost = estimate_cost(model_id, input_tokens=1000, output_tokens=1000)
         self.assertAlmostEqual(cost, rates.input_per_1k + rates.output_per_1k)

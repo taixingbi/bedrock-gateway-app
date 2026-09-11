@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from loadtests.fault_injection import AlwaysAllowGuardrailClient, ThrottlingFaultConverseClient
 from loadtests.harness import build_scenario_app, default_tenant_policy, fire_concurrent
+from services.gateway.config import load_settings
 from services.gateway.routing.circuit_breaker import BreakerState, CircuitBreaker
 
 
@@ -58,7 +59,8 @@ class BedrockThrottlingScenarioTests(unittest.IsolatedAsyncioTestCase):
         # for every single one of the 40 client requests -- the breaker
         # opened partway through and fast-failed the rest.
         self.assertLess(fake.total_calls, n_requests)
-        self.assertEqual(breaker.state_of("anthropic.claude-3-5-sonnet-20241022-v2:0"), BreakerState.OPEN)
+        default_model = load_settings().bedrock_model_id  # no route_set/models override -> this is used
+        self.assertEqual(breaker.state_of(default_model), BreakerState.OPEN)
 
         # Some requests got a real (fake-)upstream throttling error...
         self.assertIn("UPSTREAM_THROTTLED", codes)

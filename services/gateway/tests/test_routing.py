@@ -182,15 +182,26 @@ class FailNTimesThenSucceed:
 
 class RoutingIntegrationTests(unittest.TestCase):
     def test_breaker_opens_and_fallback_is_used_at_app_level(self):
-        fake = FailNTimesThenSucceed(fail_models={"anthropic.claude-3-5-sonnet-20241022-v2:0"})
+        # Pinned via the tenant's own models allowlist rather than relying
+        # on settings.bedrock_model_id's default -- keeps this test
+        # correct regardless of what the gateway's default model is
+        # configured to at any given time.
+        primary_model = "test-primary-model"
+        fallback_model = "test-fallback-model"
+
+        fake = FailNTimesThenSucceed(fail_models={primary_model})
         policy_store = InMemoryPolicyStore(
-            {"finance": _policy(tenant_id="finance", route_set="finance-chat-v1")}
+            {
+                "finance": _policy(
+                    tenant_id="finance", route_set="finance-chat-v1", models=[primary_model]
+                )
+            }
         )
         route_sets = {
             "finance-chat-v1": RouteSet(
                 name="finance-chat-v1",
-                primary="anthropic.claude-3-5-sonnet-20241022-v2:0",
-                fallbacks=["anthropic.claude-3-haiku-20240307-v1:0"],
+                primary=primary_model,
+                fallbacks=[fallback_model],
             )
         }
         settings = load_settings()
@@ -215,7 +226,7 @@ class RoutingIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["fallback"])
-        self.assertEqual(body["model"], "anthropic.claude-3-haiku-20240307-v1:0")
+        self.assertEqual(body["model"], fallback_model)
 
 
 if __name__ == "__main__":

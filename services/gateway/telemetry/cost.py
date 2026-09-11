@@ -19,6 +19,14 @@ class ModelPricing:
 
 
 DEFAULT_PRICING: Dict[str, ModelPricing] = {
+    # Nova (the gateway's current default -- see config.py). Rates are
+    # per the inference profile ID, which bills the same as the
+    # underlying model.
+    "us.amazon.nova-micro-v1:0": ModelPricing(input_per_1k=0.000035, output_per_1k=0.00014),
+    "us.amazon.nova-lite-v1:0": ModelPricing(input_per_1k=0.00006, output_per_1k=0.00024),
+    "us.amazon.nova-pro-v1:0": ModelPricing(input_per_1k=0.0008, output_per_1k=0.0032),
+    # Kept for anyone still pointed at these -- not on this account's
+    # active model list any more (see docs/ROADMAP.md's M6/CI notes).
     "anthropic.claude-3-5-sonnet-20241022-v2:0": ModelPricing(input_per_1k=0.003, output_per_1k=0.015),
     "anthropic.claude-3-haiku-20240307-v1:0": ModelPricing(input_per_1k=0.00025, output_per_1k=0.00125),
 }
