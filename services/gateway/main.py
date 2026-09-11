@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Dict, Optional
 
+from opentelemetry import trace
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -30,8 +31,10 @@ from .policy.rate_limiter import TokenBucketRateLimiter
 from .policy.store import FilePolicyStore, PolicyStore
 from .routing.circuit_breaker import CircuitBreaker
 from .routing.router import CertifiedRouter, RouteSet, load_route_sets_from_yaml
+from .telemetry.debug_capture import DebugCaptureStore
 from .telemetry.logging import configure_logging, get_logger, log_event
 from .telemetry.middleware import RequestContextMiddleware
+from .telemetry.otel import configure_tracing
 
 _logger = get_logger("gateway.main")
 
@@ -61,6 +64,8 @@ def create_app(
     response_cache: Optional[ResponseCache] = None,
     circuit_breaker: Optional[CircuitBreaker] = None,
     route_sets: Optional[Dict[str, RouteSet]] = None,
+    tracer: Optional[trace.Tracer] = None,
+    debug_capture_store: Optional[DebugCaptureStore] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -94,6 +99,12 @@ def create_app(
     router = CertifiedRouter(
         converse_client=converse_client, circuit_breaker=circuit_breaker, route_sets=route_sets
     )
+    if tracer is None:
+        tracer = configure_tracing(
+            settings.service_name, otlp_endpoint=settings.otel_exporter_otlp_endpoint or None
+        )
+    if debug_capture_store is None:
+        debug_capture_store = DebugCaptureStore(ttl_s=settings.debug_capture_ttl_s)
 
     routes = build_router(
         router=router,
@@ -104,6 +115,8 @@ def create_app(
         guardrail_client=guardrail_client,
         response_cache=response_cache,
         circuit_breaker=circuit_breaker,
+        tracer=tracer,
+        debug_capture_store=debug_capture_store,
     )
     admin_routes = build_admin_router(
         policy_store=policy_store,

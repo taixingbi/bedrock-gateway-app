@@ -76,6 +76,7 @@ def load_policies_from_yaml(path: str) -> InMemoryPolicyStore:
             slo=TenantSlo(p95_latency_ms=slo_cfg.get("p95_latency_ms")),
             policy_epoch=int(cfg.get("policy_epoch", 1)),
             allow_guardrail_bypass_on_error=bool(cfg.get("allow_guardrail_bypass_on_error", False)),
+            debug_capture_enabled=bool(cfg.get("debug_capture_enabled", False)),
         )
     return InMemoryPolicyStore(policies)
 

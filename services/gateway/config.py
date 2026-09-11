@@ -64,6 +64,10 @@ class Settings:
     circuit_breaker_failure_threshold: int
     circuit_breaker_reset_timeout_s: float
 
+    # M5 observability
+    otel_exporter_otlp_endpoint: str
+    debug_capture_ttl_s: float
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -93,4 +97,6 @@ def load_settings() -> Settings:
         response_cache_max_entries=_env_int("RESPONSE_CACHE_MAX_ENTRIES", 1000),
         circuit_breaker_failure_threshold=_env_int("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5),
         circuit_breaker_reset_timeout_s=_env_float("CIRCUIT_BREAKER_RESET_TIMEOUT_S", 30.0),
+        otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+        debug_capture_ttl_s=_env_float("DEBUG_CAPTURE_TTL_S", 900.0),
     )

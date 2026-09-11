@@ -11,7 +11,7 @@ This file just tracks milestone status against that plan's section 25.
 | M2 — Policy Plane | Tenant config + policy epoch + kill switch + push invalidation + bounded TTL | Policy changes have bounded propagation | **Done** |
 | M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | **Done** |
 | M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | **Done** |
-| M5 — Observability | OTel + latency/tokens/cost/SLO + PII-safe logging | Every request traceable | Not started |
+| M5 — Observability | OTel + latency/tokens/cost/SLO + PII-safe logging | Every request traceable | **Done** |
 | M6 — Load / Chaos | Real Bedrock quota tests + 429 + noisy neighbor + policy/failure injection | SLO and invariants survive load | Not started |
 | **V1 release** | M0–M6 | Enterprise MVP | — |
 | M7 — Async | SQS + worker + Step Functions + Batch | Long/offline workloads | Not started |
@@ -259,3 +259,59 @@ one. Also out of scope: a real preemptive per-chunk timeout (same
 rationale as M3's guardrail timeout), and true non-blocking I/O for the
 underlying boto3 EventStream iteration (it blocks the event loop per
 chunk, same simplification the non-streaming call already had since M0).
+
+## What M5 actually is
+
+`services/gateway/telemetry/`:
+
+- `otel.py` — `configure_tracing()`: a `TracerProvider` with a console
+  exporter by default (zero external deps, spans print as JSON to
+  stdout) or an OTLP HTTP exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+  set (the exporter package is an optional extra, imported lazily --
+  see requirements.txt). Idempotent, same convention as
+  `configure_logging()`. `set_span_attributes()` filters `None`s, since
+  OTel attributes can't hold them and most telemetry fields are
+  legitimately absent on some code paths.
+- `cost.py` — `estimate_cost()`: a static $/1K-token table. Not live AWS
+  billing (Bedrock pricing varies by model/region and changes) -- enough
+  to populate `estimated_cost` and prove the FinOps seam exists; real
+  pricing sync/aggregation is M8.
+- `slo.py` — `slo_breached()`: per-request flag when latency exceeds the
+  tenant's `slo.p95_latency_ms`. True p95 is a percentile over a window
+  of requests, which belongs in the metrics backend (Prometheus/Grafana),
+  not computed request-by-request here -- this is a leading indicator
+  ("this one was slow"), not a replacement for real aggregation.
+- `debug_capture.py` — `DebugCaptureStore` + `redact()`: opt-in only
+  (`TenantPolicy.debug_capture_enabled`, default `False`). Deliberately a
+  *different class* than operational telemetry (plan section 19's
+  separation) so it could carry different IAM/encryption/retention rules
+  in a real deployment -- there's no real AWS infra here to attach those
+  to, so this demonstrates the separation, not production-grade storage.
+
+`api/routes.py`'s `/v1/chat` now wraps its entire body in one
+`chat.request` span per request, with the same attribute set as the JSON
+telemetry record (tenant_id, model, policy_epoch, guardrail_version,
+tokens, latency, retry_count, fallback, cache_hit, estimated_cost,
+slo_breach) -- traces and logs deliberately share field names so either
+can be cross-referenced by `request_id`. `main.py`'s `create_app()`
+gained `tracer` and `debug_capture_store` parameters, same injectable
+pattern as everything else -- tests use `tests/otel_fixtures.py`'s
+in-memory-exporter tracer instead of the real console/OTLP one, both to
+avoid spamming stdout during `python -m unittest` and to assert on span
+attributes directly.
+
+## What M5 deliberately does NOT do
+
+Real AWS billing sync (M8/FinOps). True percentile SLO aggregation
+across a request window (a metrics-backend job, not in-process). ML-based
+PII detection in `debug_capture.redact()` (same regex patterns as M3's
+guardrail, same caveat: a placeholder behind a real interface). Because
+`debug_capture`'s redaction patterns are the same ones the input/output
+guardrail already blocks on, content that reaches debug capture at all
+has, by construction, no SSN/credit-card/email pattern left to redact in
+practice -- the redaction logic itself is still real and unit-tested
+directly (`test_observability.py`), it just can't be exercised through a
+full HTTP round trip without the guardrail intercepting first. Real
+per-tenant IAM/encryption/retention separation for the debug store (no
+AWS infra to attach it to in this MVP -- the class-level separation is
+the point, not a claim of matching production access controls).

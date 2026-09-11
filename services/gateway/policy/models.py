@@ -47,6 +47,9 @@ class TenantPolicy:
     # this lets a tenant explicitly opt a LOW_RISK guardrail policy into
     # degrading instead, rather than the gateway silently downgrading it.
     allow_guardrail_bypass_on_error: bool = False
+    # M5: opt-in only -- see telemetry/debug_capture.py. False by default
+    # means raw prompt/response content is never captured anywhere.
+    debug_capture_enabled: bool = False
 
 
 class UnknownTenantError(Exception):
