@@ -29,10 +29,10 @@ jobs:
           poetry install --with dev
 
       - name: Run unit tests (services/gateway)
-        run: python -m unittest discover -s services/gateway/tests -t .
+        run: poetry run python -m unittest discover -s services/gateway/tests -t .
 
       - name: Run load/chaos scenario tests (M6)
-        run: python -m unittest discover -s loadtests -t .
+        run: poetry run python -m unittest discover -s loadtests -t .
 
   docker:
     name: Docker build + smoke test

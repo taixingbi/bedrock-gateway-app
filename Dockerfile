@@ -10,9 +10,11 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 COPY pyproject.toml poetry.lock ./
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir 'poetry==2.1.4' \
-    && /opt/venv/bin/poetry install --only main --no-root
+    && pip install --no-cache-dir 'poetry==2.1.4' \
+    && poetry install --only main --no-root
 
 FROM python:3.11-slim
 
