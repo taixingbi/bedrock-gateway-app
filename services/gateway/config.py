@@ -57,6 +57,13 @@ class Settings:
     tenant_policy_path: str
     policy_cache_ttl_s: float
 
+    # M4 gateway reliability
+    route_set_config_path: str
+    response_cache_ttl_s: float
+    response_cache_max_entries: int
+    circuit_breaker_failure_threshold: int
+    circuit_breaker_reset_timeout_s: float
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -81,4 +88,9 @@ def load_settings() -> Settings:
         admin_required_role=os.environ.get("ADMIN_REQUIRED_ROLE", "platform_admin"),
         tenant_policy_path=os.environ.get("TENANT_POLICY_PATH", "policies/tenants.yaml"),
         policy_cache_ttl_s=_env_float("POLICY_CACHE_TTL_S", 30.0),
+        route_set_config_path=os.environ.get("ROUTE_SET_CONFIG_PATH", "policies/route_sets.yaml"),
+        response_cache_ttl_s=_env_float("RESPONSE_CACHE_TTL_S", 60.0),
+        response_cache_max_entries=_env_int("RESPONSE_CACHE_MAX_ENTRIES", 1000),
+        circuit_breaker_failure_threshold=_env_int("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5),
+        circuit_breaker_reset_timeout_s=_env_float("CIRCUIT_BREAKER_RESET_TIMEOUT_S", 30.0),
     )

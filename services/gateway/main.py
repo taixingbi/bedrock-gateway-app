@@ -9,7 +9,7 @@ Run under uvicorn directly (what the Dockerfile does):
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Dict, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -20,6 +20,7 @@ from .api.admin_routes import build_admin_router
 from .api.routes import build_router
 from .auth.devkeys import load_or_create_dev_keypair
 from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
+from .cache.store import InMemoryResponseCache, ResponseCache
 from .config import Settings, load_settings
 from .guardrails.basic_guardrail import BasicGuardrailClient
 from .guardrails.client import GuardrailClient
@@ -27,6 +28,8 @@ from .inference.bedrock_client import BedrockClient, ConverseClient
 from .policy.cache import PolicySnapshotCache
 from .policy.rate_limiter import TokenBucketRateLimiter
 from .policy.store import FilePolicyStore, PolicyStore
+from .routing.circuit_breaker import CircuitBreaker
+from .routing.router import CertifiedRouter, RouteSet, load_route_sets_from_yaml
 from .telemetry.logging import configure_logging, get_logger, log_event
 from .telemetry.middleware import RequestContextMiddleware
 
@@ -55,6 +58,9 @@ def create_app(
     token_verifier: Optional[TokenVerifier] = None,
     policy_store: Optional[PolicyStore] = None,
     guardrail_client: Optional[GuardrailClient] = None,
+    response_cache: Optional[ResponseCache] = None,
+    circuit_breaker: Optional[CircuitBreaker] = None,
+    route_sets: Optional[Dict[str, RouteSet]] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -71,17 +77,33 @@ def create_app(
         policy_store = FilePolicyStore(settings.tenant_policy_path)
     if guardrail_client is None:
         guardrail_client = BasicGuardrailClient()
+    if response_cache is None:
+        response_cache = InMemoryResponseCache(
+            ttl_s=settings.response_cache_ttl_s, max_entries=settings.response_cache_max_entries
+        )
+    if circuit_breaker is None:
+        circuit_breaker = CircuitBreaker(
+            failure_threshold=settings.circuit_breaker_failure_threshold,
+            reset_timeout_s=settings.circuit_breaker_reset_timeout_s,
+        )
+    if route_sets is None:
+        route_sets = load_route_sets_from_yaml(settings.route_set_config_path)
 
     policy_cache = PolicySnapshotCache(store=policy_store, ttl_s=settings.policy_cache_ttl_s)
     rate_limiter = TokenBucketRateLimiter()
+    router = CertifiedRouter(
+        converse_client=converse_client, circuit_breaker=circuit_breaker, route_sets=route_sets
+    )
 
     routes = build_router(
-        converse_client=converse_client,
+        router=router,
         settings=settings,
         token_verifier=token_verifier,
         policy_cache=policy_cache,
         rate_limiter=rate_limiter,
         guardrail_client=guardrail_client,
+        response_cache=response_cache,
+        circuit_breaker=circuit_breaker,
     )
     admin_routes = build_admin_router(
         policy_store=policy_store,

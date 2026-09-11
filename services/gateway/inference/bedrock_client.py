@@ -18,7 +18,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Protocol
+from typing import Iterator, List, Optional, Protocol
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,20 @@ class ConverseResult:
     stop_reason: Optional[str]
     latency_ms: float
     retry_count: int = 0
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """One event from converse_stream(). A chunk either carries a text
+    delta or (on the final chunk) the completed message's stop_reason/
+    usage -- never both, so callers can check `is_final` rather than
+    guessing from which fields are populated."""
+
+    text_delta: str = ""
+    is_final: bool = False
+    stop_reason: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
 
 
 class BedrockInvocationError(Exception):
@@ -63,6 +77,23 @@ class ConverseClient(Protocol):
         max_tokens: int,
         temperature: float,
     ) -> ConverseResult: ...
+
+    def converse_stream(
+        self,
+        *,
+        model_id: str,
+        messages: List[BedrockChatMessage],
+        max_tokens: int,
+        temperature: float,
+    ) -> Iterator[StreamChunk]:
+        """No retry/backoff here (M4, plan section 14): retrying a
+        partially-streamed response would mean re-sending already-emitted
+        tokens to the client, which isn't a clean retry. A failure
+        mid-stream surfaces as BedrockInvocationError raised from the
+        generator; the caller (streaming.py) turns that into an SSE error
+        event rather than an HTTP status code, since headers are already
+        sent by the time streaming starts."""
+        ...
 
 
 _RETRYABLE_ERROR_CODES = {
@@ -153,6 +184,59 @@ class BedrockClient:
                 # bounded exponential backoff + full jitter (section 15/16 of the plan)
                 sleep_s = self._base_backoff_s * (2 ** (attempt - 1))
                 time.sleep(random.uniform(0, sleep_s))
+
+    def converse_stream(
+        self,
+        *,
+        model_id: str,
+        messages: List[BedrockChatMessage],
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+    ) -> Iterator[StreamChunk]:
+        bedrock_messages = [
+            {"role": m.role, "content": [{"text": m.text}]} for m in messages
+        ]
+
+        try:
+            response = self._client.converse_stream(
+                modelId=model_id,
+                messages=bedrock_messages,
+                inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
+            )
+        except Exception as exc:
+            error_code = _extract_error_code(exc)
+            raise BedrockInvocationError(
+                f"Bedrock stream invocation failed: {exc}",
+                code=error_code or "UPSTREAM_ERROR",
+                retryable=False,
+            ) from exc
+
+        stop_reason: Optional[str] = None
+        input_tokens: Optional[int] = None
+        output_tokens: Optional[int] = None
+        try:
+            for event in response["stream"]:
+                if "contentBlockDelta" in event:
+                    text = event["contentBlockDelta"].get("delta", {}).get("text")
+                    if text:
+                        yield StreamChunk(text_delta=text)
+                elif "messageStop" in event:
+                    stop_reason = event["messageStop"].get("stopReason")
+                elif "metadata" in event:
+                    usage = event["metadata"].get("usage", {})
+                    input_tokens = usage.get("inputTokens")
+                    output_tokens = usage.get("outputTokens")
+        except Exception as exc:
+            error_code = _extract_error_code(exc)
+            raise BedrockInvocationError(
+                f"Bedrock stream failed mid-stream: {exc}",
+                code=error_code or "UPSTREAM_ERROR",
+                retryable=False,
+            ) from exc
+
+        yield StreamChunk(
+            is_final=True, stop_reason=stop_reason, input_tokens=input_tokens, output_tokens=output_tokens
+        )
 
 
 def _extract_error_code(exc: Exception) -> Optional[str]:

@@ -1,4 +1,4 @@
-"""HTTP handlers for the gateway API (M0 subset: /healthz, /v1/chat).
+"""HTTP handlers for the gateway API: /healthz, /v1/chat.
 
 Deliberately framework-light (Starlette, not FastAPI) so it runs and is
 testable without a package installer reaching the internet -- see
@@ -13,16 +13,21 @@ import uuid
 
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .. import pipeline
 from ..auth.jwt_verifier import TokenVerifier
+from ..cache.keys import build_cache_key, normalize_messages
+from ..cache.store import CachedResponse, ResponseCache
 from ..config import Settings
 from ..guardrails.client import GuardrailClient
-from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError, ConverseClient
+from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError
 from ..policy.cache import PolicySnapshotCache
 from ..policy.rate_limiter import TokenBucketRateLimiter
+from ..routing.circuit_breaker import CircuitBreaker
+from ..routing.router import AllRoutesUnavailableError, CertifiedRouter
+from ..streaming import stream_chat_response
 from ..telemetry.logging import get_logger, log_event
 from .errors import error_response as _error
 from .schemas import ChatRequest, ChatResponse, Usage
@@ -41,12 +46,14 @@ _DEFAULT_ERROR_STATUS = (502, "UPSTREAM_ERROR")
 
 def build_router(
     *,
-    converse_client: ConverseClient,
+    router: CertifiedRouter,
     settings: Settings,
     token_verifier: TokenVerifier,
     policy_cache: PolicySnapshotCache,
     rate_limiter: TokenBucketRateLimiter,
     guardrail_client: GuardrailClient,
+    response_cache: ResponseCache,
+    circuit_breaker: CircuitBreaker,
 ) -> list[Route]:
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -104,10 +111,71 @@ def build_router(
             BedrockChatMessage(role=m.role, text=m.content) for m in chat_request.messages
         ]
 
+        if chat_request.stream:
+            # No cache, no output guardrail, no fallback for streaming --
+            # documented simplification, see streaming.py's module docstring.
+            if not circuit_breaker.allow(model_id):
+                return _error(
+                    503, "UPSTREAM_UNAVAILABLE",
+                    f"model '{model_id}' is temporarily unavailable (circuit open)",
+                    request_id,
+                )
+            chunk_iter = router_converse_stream(
+                router, model_id=model_id, messages=messages,
+                max_tokens=chat_request.max_tokens, temperature=chat_request.temperature,
+            )
+            return StreamingResponse(
+                stream_chat_response(
+                    chunk_iter,
+                    model_id=model_id,
+                    request_id=request_id,
+                    tenant_id=identity.tenant_id,
+                    circuit_breaker=circuit_breaker,
+                    is_disconnected=request.is_disconnected,
+                ),
+                media_type="text/event-stream",
+                headers={"x-request-id": request_id, "cache-control": "no-cache"},
+            )
+
+        cache_key = build_cache_key(
+            tenant_id=identity.tenant_id,
+            application_id=identity.application_id,
+            policy=policy,
+            model_id=model_id,
+            max_tokens=chat_request.max_tokens,
+            temperature=chat_request.temperature,
+            messages=normalize_messages(chat_request.messages),
+        )
+        cached = response_cache.get(cache_key)
+
+        if cached is not None:
+            log_event(
+                _chat_logger, "INFO", "chat request completed",
+                request_id=request_id, model=cached.model_id, tenant_id=identity.tenant_id,
+                policy_epoch=policy.policy_epoch, route_set=policy.route_set,
+                guardrail_version=policy.guardrail_policy, guardrail_action="ALLOW",
+                guardrail_latency_ms=input_guardrail_ms, blocked_reason=None,
+                input_tokens=cached.input_tokens, output_tokens=cached.output_tokens,
+                ttft_ms=None, latency_ms=0.0, retry_count=0, fallback=False,
+                cache_hit=True, status=200,
+            )
+            response = ChatResponse(
+                request_id=request_id,
+                model=cached.model_id,
+                output=cached.text,
+                stop_reason=cached.stop_reason,
+                usage=Usage(input_tokens=cached.input_tokens, output_tokens=cached.output_tokens),
+                latency_ms=0.0,
+                cache_hit=True,
+                fallback=False,
+            )
+            return JSONResponse(response.model_dump())
+
         start = time.perf_counter()
         try:
-            result = converse_client.converse(
-                model_id=model_id,
+            routed = router.converse(
+                primary_model_id=model_id,
+                route_set_name=policy.route_set,
                 messages=messages,
                 max_tokens=chat_request.max_tokens,
                 temperature=chat_request.temperature,
@@ -122,6 +190,17 @@ def build_router(
                 error=str(exc),
             )
             return _error(status_code, error_code, str(exc), request_id)
+        except AllRoutesUnavailableError as exc:
+            log_event(
+                _chat_logger, "ERROR", "chat request failed",
+                request_id=request_id, model=model_id, status=503,
+                tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                latency_ms=round((time.perf_counter() - start) * 1000, 2),
+                error=str(exc),
+            )
+            return _error(503, "ALL_ROUTES_UNAVAILABLE", str(exc), request_id)
+
+        result = routed.result
 
         guardrail_start = time.perf_counter()
         try:
@@ -132,7 +211,7 @@ def build_router(
             output_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
             log_event(
                 _chat_logger, "ERROR", "chat request failed",
-                request_id=request_id, model=model_id, status=exc.status_code,
+                request_id=request_id, model=routed.model_id, status=exc.status_code,
                 tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
                 guardrail_version=policy.guardrail_policy, guardrail_action="BLOCK",
                 guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
@@ -141,10 +220,21 @@ def build_router(
             return _error(exc.status_code, exc.code, str(exc), request_id)
         output_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
 
+        response_cache.set(
+            cache_key,
+            CachedResponse(
+                text=result.text,
+                stop_reason=result.stop_reason,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                model_id=routed.model_id,
+            ),
+        )
+
         log_event(
             _chat_logger, "INFO", "chat request completed",
             request_id=request_id,
-            model=model_id,
+            model=routed.model_id,
             tenant_id=identity.tenant_id,
             policy_epoch=policy.policy_epoch,
             route_set=policy.route_set,
@@ -152,26 +242,25 @@ def build_router(
             guardrail_action="ALLOW",
             guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
             blocked_reason=None,
-            # Fields below are placeholders until the corresponding milestone
-            # lands (M4 cache/fallback, M14 streaming). Kept here so the
-            # schema doesn't change shape later -- see section 17 of the plan.
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             ttft_ms=None,
             latency_ms=result.latency_ms,
             retry_count=result.retry_count,
-            fallback=False,
+            fallback=routed.fallback,
             cache_hit=False,
             status=200,
         )
 
         response = ChatResponse(
             request_id=request_id,
-            model=model_id,
+            model=routed.model_id,
             output=result.text,
             stop_reason=result.stop_reason,
             usage=Usage(input_tokens=result.input_tokens, output_tokens=result.output_tokens),
             latency_ms=result.latency_ms,
+            cache_hit=False,
+            fallback=routed.fallback,
         )
         return JSONResponse(response.model_dump())
 
@@ -179,3 +268,13 @@ def build_router(
         Route("/healthz", healthz, methods=["GET"]),
         Route("/v1/chat", chat, methods=["POST"]),
     ]
+
+
+def router_converse_stream(router: CertifiedRouter, *, model_id, messages, max_tokens, temperature):
+    """Streaming bypasses CertifiedRouter's fallback loop (see module
+    docstring) but still goes through the same underlying ConverseClient
+    the router wraps, so streaming and non-streaming share one Bedrock
+    client configuration."""
+    return router.converse_client.converse_stream(
+        model_id=model_id, messages=messages, max_tokens=max_tokens, temperature=temperature
+    )

@@ -25,6 +25,14 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(min_length=1)
     max_tokens: int = Field(default=1024, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=1.0)
+    stream: bool = Field(
+        default=False,
+        description=(
+            "SSE streaming (M4, plan section 14). Streaming responses skip "
+            "the output guardrail and certified-router fallback -- see "
+            "docs/ROADMAP.md."
+        ),
+    )
 
     @field_validator("messages")
     @classmethod
@@ -46,6 +54,8 @@ class ChatResponse(BaseModel):
     stop_reason: Optional[str]
     usage: Usage
     latency_ms: float
+    cache_hit: bool = False
+    fallback: bool = False
 
 
 class ErrorBody(BaseModel):

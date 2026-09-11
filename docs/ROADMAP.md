@@ -10,7 +10,7 @@ This file just tracks milestone status against that plan's section 25.
 | M1 — Identity | OIDC/JWT + RBAC/ABAC + tenant resolution | Tenant identity trustworthy | **Done** |
 | M2 — Policy Plane | Tenant config + policy epoch + kill switch + push invalidation + bounded TTL | Policy changes have bounded propagation | **Done** |
 | M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | **Done** |
-| M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | Not started |
+| M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | **Done** |
 | M5 — Observability | OTel + latency/tokens/cost/SLO + PII-safe logging | Every request traceable | Not started |
 | M6 — Load / Chaos | Real Bedrock quota tests + 429 + noisy neighbor + policy/failure injection | SLO and invariants survive load | Not started |
 | **V1 release** | M0–M6 | Enterprise MVP | — |
@@ -197,3 +197,65 @@ per-check timeout (test fakes simulate "unavailable" by raising
 deadline -- a real HTTP-backed `GuardrailClient` would enforce its own
 request timeout and raise the same exception). Caching, certified
 routing/fallback, streaming — still M4.
+
+## What M4 actually is
+
+`services/gateway/cache/`:
+
+- `keys.py` — `build_cache_key()`: SHA256 over exactly the fields plan
+  section 12 lists (tenant_id, application_id, model_route_id/version,
+  inference_parameters, normalized_messages, guardrail_version,
+  policy_epoch; prompt_template_version/tool_schema_version/
+  retrieval_context_hash reserved as `None` until those features exist).
+  A `policy_epoch` bump (any admin state change, per M2) makes every
+  previously-cached response for that tenant an automatic miss.
+- `store.py` — `ResponseCache` Protocol (same seam pattern) +
+  `InMemoryResponseCache` (TTL + LRU eviction at `max_entries`). Only
+  responses that already passed the output guardrail are ever written
+  (see `api/routes.py`) -- never raw model output.
+
+`services/gateway/routing/`:
+
+- `circuit_breaker.py` — `CircuitBreaker`: per-model CLOSED/OPEN/
+  HALF_OPEN, in-memory, same "real interface, no provisioned infra"
+  pattern as the rate limiter.
+- `router.py` — `CertifiedRouter`: wraps the retry-capable
+  `BedrockClient` (M0's per-call bounded retry + backoff + jitter is
+  unchanged) with the breaker and fallback strictly within a tenant's
+  assigned `route_set` (`policies/route_sets.yaml`) -- a model not
+  listed there is never tried, even when the primary fails (tested).
+  No route_set assigned means exactly one candidate, i.e. identical to
+  a direct M0-era call.
+
+`services/gateway/streaming.py` — `stream_chat_response()`: SSE
+generator, framework-independent (`is_disconnected` is just an async
+predicate) so client-disconnect cancellation is unit-testable without a
+real ASGI disconnect. On disconnect it calls `.close()` on the upstream
+generator (raises `GeneratorExit` into it -- verified against both the
+fake and, by construction, the real `BedrockClient.converse_stream`,
+which iterates a boto3 EventStream the same way).
+
+`api/routes.py`'s `/v1/chat` now branches on `stream`: non-streaming
+requests go cache lookup -> `CertifiedRouter.converse()` -> output
+guardrail -> cache write; streaming requests go straight to
+`converse_stream()` on a single circuit-breaker-gated model (see
+limitations below). `ChatResponse` gained `cache_hit`/`fallback` fields;
+telemetry's `fallback`/`cache_hit` are real now, no longer placeholders.
+
+`main.py`'s `create_app()` gained `response_cache`, `circuit_breaker`,
+and `route_sets` parameters, same injectable pattern as everything else.
+
+## What M4 deliberately does NOT do (streaming limitations)
+
+Streaming responses skip the output guardrail (blocking after the fact
+can't un-send tokens already sent to the client -- a real system needs
+incremental/partial-buffer guardrail checks, a milestone-sized feature of
+its own) and skip certified-router fallback (switching models mid-stream
+after tokens have already reached the client isn't a clean retry). The
+circuit breaker still gates and records the single streaming attempt.
+Both are deliberate, documented scope cuts, not oversights -- revisit
+if/when streaming becomes a primary interface rather than a secondary
+one. Also out of scope: a real preemptive per-chunk timeout (same
+rationale as M3's guardrail timeout), and true non-blocking I/O for the
+underlying boto3 EventStream iteration (it blocks the event loop per
+chunk, same simplification the non-streaming call already had since M0).
