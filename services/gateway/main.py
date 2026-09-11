@@ -21,6 +21,8 @@ from .api.routes import build_router
 from .auth.devkeys import load_or_create_dev_keypair
 from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .config import Settings, load_settings
+from .guardrails.basic_guardrail import BasicGuardrailClient
+from .guardrails.client import GuardrailClient
 from .inference.bedrock_client import BedrockClient, ConverseClient
 from .policy.cache import PolicySnapshotCache
 from .policy.rate_limiter import TokenBucketRateLimiter
@@ -52,6 +54,7 @@ def create_app(
     converse_client: Optional[ConverseClient] = None,
     token_verifier: Optional[TokenVerifier] = None,
     policy_store: Optional[PolicyStore] = None,
+    guardrail_client: Optional[GuardrailClient] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -66,6 +69,8 @@ def create_app(
         token_verifier = _build_default_token_verifier(settings)
     if policy_store is None:
         policy_store = FilePolicyStore(settings.tenant_policy_path)
+    if guardrail_client is None:
+        guardrail_client = BasicGuardrailClient()
 
     policy_cache = PolicySnapshotCache(store=policy_store, ttl_s=settings.policy_cache_ttl_s)
     rate_limiter = TokenBucketRateLimiter()
@@ -76,6 +81,7 @@ def create_app(
         token_verifier=token_verifier,
         policy_cache=policy_cache,
         rate_limiter=rate_limiter,
+        guardrail_client=guardrail_client,
     )
     admin_routes = build_admin_router(
         policy_store=policy_store,

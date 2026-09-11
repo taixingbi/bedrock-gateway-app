@@ -19,6 +19,7 @@ from starlette.routing import Route
 from .. import pipeline
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
+from ..guardrails.client import GuardrailClient
 from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError, ConverseClient
 from ..policy.cache import PolicySnapshotCache
 from ..policy.rate_limiter import TokenBucketRateLimiter
@@ -45,6 +46,7 @@ def build_router(
     token_verifier: TokenVerifier,
     policy_cache: PolicySnapshotCache,
     rate_limiter: TokenBucketRateLimiter,
+    guardrail_client: GuardrailClient,
 ) -> list[Route]:
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -80,6 +82,24 @@ def build_router(
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
+        combined_input_text = "\n".join(m.content for m in chat_request.messages)
+        guardrail_start = time.perf_counter()
+        try:
+            pipeline.check_input_guardrail(
+                combined_input_text, policy=policy, guardrail_client=guardrail_client
+            )
+        except pipeline.PipelineError as exc:
+            log_event(
+                _chat_logger, "ERROR", "chat request failed",
+                request_id=request_id, model=model_id, status=exc.status_code,
+                tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                guardrail_version=policy.guardrail_policy, guardrail_action="BLOCK",
+                guardrail_latency_ms=round((time.perf_counter() - guardrail_start) * 1000, 2),
+                blocked_reason=str(exc), error=str(exc),
+            )
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+        input_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
+
         messages = [
             BedrockChatMessage(role=m.role, text=m.content) for m in chat_request.messages
         ]
@@ -103,6 +123,24 @@ def build_router(
             )
             return _error(status_code, error_code, str(exc), request_id)
 
+        guardrail_start = time.perf_counter()
+        try:
+            pipeline.check_output_guardrail(
+                result.text, policy=policy, guardrail_client=guardrail_client
+            )
+        except pipeline.PipelineError as exc:
+            output_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
+            log_event(
+                _chat_logger, "ERROR", "chat request failed",
+                request_id=request_id, model=model_id, status=exc.status_code,
+                tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                guardrail_version=policy.guardrail_policy, guardrail_action="BLOCK",
+                guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
+                blocked_reason=str(exc), error=str(exc),
+            )
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+        output_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
+
         log_event(
             _chat_logger, "INFO", "chat request completed",
             request_id=request_id,
@@ -110,11 +148,13 @@ def build_router(
             tenant_id=identity.tenant_id,
             policy_epoch=policy.policy_epoch,
             route_set=policy.route_set,
+            guardrail_version=policy.guardrail_policy,
+            guardrail_action="ALLOW",
+            guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
+            blocked_reason=None,
             # Fields below are placeholders until the corresponding milestone
-            # lands (M3 guardrails, M4 cache/fallback, M14 streaming). Kept
-            # here so the schema doesn't change shape later -- see section
-            # 17 of the plan.
-            guardrail_version=None,
+            # lands (M4 cache/fallback, M14 streaming). Kept here so the
+            # schema doesn't change shape later -- see section 17 of the plan.
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             ttft_ms=None,

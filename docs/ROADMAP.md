@@ -9,7 +9,7 @@ This file just tracks milestone status against that plan's section 25.
 | M0 — Walking Skeleton | ECS + `/chat` + Bedrock + minimal telemetry | End-to-end inference works | **Done** |
 | M1 — Identity | OIDC/JWT + RBAC/ABAC + tenant resolution | Tenant identity trustworthy | **Done** |
 | M2 — Policy Plane | Tenant config + policy epoch + kill switch + push invalidation + bounded TTL | Policy changes have bounded propagation | **Done** |
-| M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | Not started |
+| M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | **Done** |
 | M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | Not started |
 | M5 — Observability | OTel + latency/tokens/cost/SLO + PII-safe logging | Every request traceable | Not started |
 | M6 — Load / Chaos | Real Bedrock quota tests + 429 + noisy neighbor + policy/failure injection | SLO and invariants survive load | Not started |
@@ -149,3 +149,51 @@ section 8 describes; `PolicyStore`/`MutablePolicyStore` are the seam a
 real control-plane-backed implementation plugs into later). `READ_ONLY`
 enforcement (no write-type endpoint exists yet to apply it to). Guardrails,
 cache, certified routing/fallback, streaming — still M3/M4.
+
+## What M3 actually is
+
+`services/gateway/guardrails/`:
+
+- `models.py` — `GuardrailAction` (ALLOW/BLOCK), `SafetyClass`
+  (STRICT/STANDARD/LOW_RISK), `GuardrailDecision`.
+- `client.py` — `GuardrailClient` Protocol (`check_input`/`check_output`,
+  same seam pattern as `ConverseClient`/`TokenVerifier`/`PolicyStore`) and
+  `GuardrailCheckError`, raised by an implementation when the check
+  itself couldn't complete (timeout/unavailable) -- distinct from a
+  completed BLOCK decision.
+- `basic_guardrail.py` — `BasicGuardrailClient`: regex/keyword PII
+  (SSN/credit-card/email) and a prompt-injection denylist. Deliberately
+  not ML-grade, same "boring now, swap later" seam as `BedrockClient`;
+  a real deployment drops in Bedrock Guardrails/Comprehend behind the
+  same Protocol.
+- `fail_closed.py` — `run_guardrail_check()` implements the core
+  invariant from plan section 11: a `GuardrailCheckError` fails closed
+  (`GuardrailUnavailableError`) for STRICT/STANDARD safety classes, and
+  for LOW_RISK too *unless* the tenant policy explicitly set
+  `allow_guardrail_bypass_on_error` -- no silent downgrade otherwise.
+  `classify_safety()` maps a `guardrail_policy` id to a safety class via
+  a naming convention (`-strict`/`-lowrisk`/default standard) until
+  guardrail policies get their own registry.
+
+`pipeline.py` gained `check_input_guardrail` (after rate limiting, before
+the model is called; BLOCK -> 400 `INPUT_BLOCKED`, fail-closed -> 503
+`AI_SAFETY_SERVICE_UNAVAILABLE`) and `check_output_guardrail` (after
+Bedrock responds, before the response is returned; BLOCK -> 502
+`OUTPUT_BLOCKED`). In both failure paths, `converse_client.converse()` is
+never called or its result never reaches the client (tested directly on
+the fake). Telemetry now fills `guardrail_version`, `guardrail_action`,
+`guardrail_latency_ms`, `blocked_reason` — no longer placeholders.
+
+`main.py`'s `create_app()` gained a `guardrail_client` parameter
+(defaults to `BasicGuardrailClient()`), same injectable pattern as the
+other four dependencies.
+
+## What M3 deliberately does NOT do
+
+ML-based moderation/PII detection (regex is a placeholder behind a real
+Protocol, not a claim of production-grade accuracy). A real preemptive
+per-check timeout (test fakes simulate "unavailable" by raising
+`GuardrailCheckError` directly rather than actually blocking past a
+deadline -- a real HTTP-backed `GuardrailClient` would enforce its own
+request timeout and raise the same exception). Caching, certified
+routing/fallback, streaming — still M4.

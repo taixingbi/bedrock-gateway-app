@@ -13,11 +13,14 @@ machinery.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from .auth import rbac
 from .auth.identity import AuthError, AuthorizationError, Identity, identity_from_claims
 from .auth.jwt_verifier import TokenVerifier
+from .guardrails.client import GuardrailClient
+from .guardrails.fail_closed import GuardrailUnavailableError, run_guardrail_check
+from .guardrails.models import GuardrailAction, GuardrailDecision
 from .policy.cache import PolicySnapshotCache
 from .policy.models import BLOCKING_STATES, TenantPolicy, TenantState, UnknownTenantError
 from .policy.rate_limiter import TokenBucketRateLimiter
@@ -123,3 +126,47 @@ def enforce_model_allowlist(
     if policy.models:
         return policy.models[0]
     return default_model
+
+
+def check_input_guardrail(
+    text: str, *, policy: TenantPolicy, guardrail_client: GuardrailClient
+) -> GuardrailDecision:
+    """Stage 5: Input Guardrail (plan sections 10-11). Raises
+    PipelineError on BLOCK (400) or on fail-closed unavailability (503,
+    AI_SAFETY_SERVICE_UNAVAILABLE) -- the model is never called in either
+    case."""
+    decision = _run_guardrail(
+        lambda: guardrail_client.check_input(text, guardrail_policy=policy.guardrail_policy),
+        policy=policy,
+    )
+    if decision.action == GuardrailAction.BLOCK:
+        raise PipelineError(400, "INPUT_BLOCKED", decision.reason or "input blocked by guardrail")
+    return decision
+
+
+def check_output_guardrail(
+    text: str, *, policy: TenantPolicy, guardrail_client: GuardrailClient
+) -> GuardrailDecision:
+    """Stage 6 (post-Bedrock): Output Guardrail. A blocked completion is
+    never returned to the caller (502, OUTPUT_BLOCKED) -- same
+    fail-closed contract as the input side."""
+    decision = _run_guardrail(
+        lambda: guardrail_client.check_output(text, guardrail_policy=policy.guardrail_policy),
+        policy=policy,
+    )
+    if decision.action == GuardrailAction.BLOCK:
+        raise PipelineError(502, "OUTPUT_BLOCKED", decision.reason or "output blocked by guardrail")
+    return decision
+
+
+def _run_guardrail(
+    check: Callable[[], GuardrailDecision], *, policy: TenantPolicy
+) -> GuardrailDecision:
+    try:
+        return run_guardrail_check(
+            check,
+            guardrail_policy=policy.guardrail_policy,
+            allow_bypass_on_error=policy.allow_guardrail_bypass_on_error,
+        )
+    except GuardrailUnavailableError as exc:
+        raise PipelineError(503, "AI_SAFETY_SERVICE_UNAVAILABLE", str(exc)) from exc
