@@ -12,8 +12,8 @@ This file just tracks milestone status against that plan's section 25.
 | M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | **Done** |
 | M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | **Done** |
 | M5 — Observability | OTel + latency/tokens/cost/SLO + PII-safe logging | Every request traceable | **Done** |
-| M6 — Load / Chaos | Real Bedrock quota tests + 429 + noisy neighbor + policy/failure injection | SLO and invariants survive load | Not started |
-| **V1 release** | M0–M6 | Enterprise MVP | — |
+| M6 — Load / Chaos | Real Bedrock quota tests + 429 + noisy neighbor + policy/failure injection | SLO and invariants survive load | **Done** (real-Bedrock quota run is manual/on-request -- see docs/LOAD_TESTING.md) |
+| **V1 release** | M0–M6 | Enterprise MVP | **Done** |
 | M7 — Async | SQS + worker + Step Functions + Batch | Long/offline workloads | Not started |
 | M8 — FinOps | budgets + chargeback/showback + anomaly alerts | Cost governance | Not started |
 | M9 — Model Lifecycle | golden set + certification + canary + rollback | Controlled model deployment | Not started |
@@ -315,3 +315,87 @@ full HTTP round trip without the guardrail intercepting first. Real
 per-tenant IAM/encryption/retention separation for the debug store (no
 AWS infra to attach it to in this MVP -- the class-level separation is
 the point, not a claim of matching production access controls).
+
+## What M6 actually is
+
+`loadtests/` (full detail in `docs/LOAD_TESTING.md`):
+
+- `fault_injection.py` — fakes distinct from `services/gateway/tests/fakes.py`:
+  `ThrottlingFaultConverseClient` (throttles a configurable fraction of
+  calls, thread-safe counters), `FlakyGuardrailClient` (guardrail backend
+  unavailable at a configurable rate), `AlwaysAllowGuardrailClient` (a
+  "control" guardrail for scenarios not about safety).
+- `harness.py` — `build_scenario_app()` wires a real `create_app()`
+  instance to those fakes and drives it over `httpx.ASGITransport`: a
+  genuine request/response cycle through the full Starlette app (real
+  locks around the real rate limiter/circuit breaker/response cache/
+  policy cache) with no socket, no port, no subprocess.
+- `<area>/test_scenario.py` (`bedrock/`, `tenant/`, `failure/`,
+  `guardrails/`) — five automated, `unittest`-discoverable scenarios,
+  each firing a burst of *concurrent* requests and asserting on the
+  resulting call counts/status codes: circuit breaker prevents a retry
+  storm under throttling; tenant noisy-neighbor isolation holds under
+  simultaneous bursts; kill-switch blocks the very next request after an
+  admin flip; a policy_epoch bump invalidates the cache even under
+  concurrent read/write races; a STRICT tenant fails closed for every
+  one of many concurrent requests when its guardrail is down.
+  `python -m unittest discover -s loadtests -t .` runs all five.
+- `<area>/locustfile.py` — the human-run, real-HTTP counterpart to each
+  scenario, for actual throughput/latency numbers against a live gateway
+  process (fake-backed for a repeatable number, or deliberately by hand
+  against real Bedrock -- see docs/LOAD_TESTING.md for exactly how and
+  the cost/quota disclaimer). Not executed by this repo's automation.
+
+**Deviation from the original plan wording:** the plan says to run these
+through locust with an assertable pass/fail. Getting a specific
+concurrency invariant (not just an aggregate error rate) out of a locust
+subprocess run means parsing its CSV/stats output, which is a lot of
+moving parts for what these scenarios are actually about --
+*concurrency correctness inside this one process*. The automated half
+uses direct ASGI concurrency instead (see `loadtests/harness.py`'s
+docstring); the locustfiles remain real and are still the right tool for
+an actual load run against a live server -- they're just not what
+asserts pass/fail here.
+
+## What M6 deliberately does NOT do
+
+Execute a real-Bedrock load test (cost + your AWS credentials -- the
+locustfiles support it, see docs/LOAD_TESTING.md, but running it is on
+you, not automated). Redis-unavailable / DynamoDB-throttling / queue-backlog
+scenarios from plan section 17's full list -- there's no Redis, DynamoDB,
+or queue in this MVP to inject those faults into yet (M2/M4's stores are
+in-memory behind swappable Protocols; M7/Async is where a queue shows
+up). Latency-spike and stream-disconnect-under-load as dedicated M6
+scenarios (stream disconnect is already unit-tested directly in M4's
+`test_streaming.py`; a dedicated load-scale version would mostly re-prove
+the same cancellation mechanism under more concurrency, not a new
+invariant).
+
+---
+
+# V1 — Enterprise MVP: done
+
+M0 through M6 are complete. Revisiting plan section 28's acceptance
+criteria against what's actually built:
+
+| Criterion | Status |
+|---|---|
+| Tenant A cannot escape tenant isolation | Rate limiter/kill-switch/cache are all keyed and scoped per tenant_id (M2/M4), tested under concurrent load (M6) |
+| Guardrail failure cannot silently bypass safety | Fail-closed by default; LOW_RISK bypass is explicit opt-in only (M3), tested under concurrent load (M6) |
+| Policy revocation takes effect within a bounded time | Push invalidation + bounded TTL (M2), tested under load (M6) |
+| Cache cannot bypass a newer security or guardrail policy | policy_epoch/guardrail_version are cache key fields (M4), invalidation tested under concurrent load (M6) |
+| Fallback cannot bypass model evaluation | Fallback candidates only ever come from `policies/route_sets.yaml` (M4) |
+| Client disconnect propagates upstream cancellation | `generator.close()` on disconnect (M4) |
+| 429 throttling does not create retry storms | Circuit breaker bounds calls to a failing model even under concurrent load (M4/M6) |
+| Control-plane outage does not automatically stop the data plane | Policy snapshot cache never calls the store synchronously per request (M2) |
+| Production traffic only reaches certified models | Route sets are the only source of fallback candidates (M4) |
+| Telemetry does not expose raw prompts/responses by default | Grep-the-logs test proves it; debug capture is separate and opt-in (M5) |
+
+What V1 does **not** claim: real AWS infra (no Terraform apply --
+`infra/` stays a placeholder), a real IdP integration (dev keypair
+unless `OIDC_JWKS_URL` is configured against one), ML-grade guardrails
+(regex placeholder behind a real interface), or a real-Bedrock load run
+(documented, not executed). M7 (Async), M8 (FinOps), M9 (Model
+Lifecycle), and M10 (Portal) are unstarted -- V1 is the walking, talking,
+safety-and-reliability-tested gateway; those are the rest of the
+platform in plan.md.
