@@ -121,7 +121,7 @@ class BedrockClient:
         except ImportError as exc:  # pragma: no cover - exercised only when boto3 truly missing
             raise RuntimeError(
                 "boto3 is required to construct a real BedrockClient. "
-                "Install it (see requirements.txt) or inject a fake ConverseClient for tests."
+                "Install it (see pyproject.toml) or inject a fake ConverseClient for tests."
             ) from exc
 
         self._max_retries = max_retries

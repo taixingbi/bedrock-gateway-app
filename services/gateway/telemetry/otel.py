@@ -6,7 +6,7 @@ without standing up a collector -- and an OTLP HTTP exporter when
 `OTEL_EXPORTER_OTLP_ENDPOINT` is set, for a real backend (Grafana Tempo,
 Honeycomb, X-Ray via the ADOT collector, etc.). The OTLP exporter package
 (`opentelemetry-exporter-otlp-proto-http`) is an optional extra, imported
-lazily only when an endpoint is configured -- see requirements.txt.
+lazily only when an endpoint is configured -- see pyproject.toml.
 
 `configure_tracing()` is idempotent (safe to call more than once), same
 convention as `telemetry/logging.py`'s `configure_logging()`.

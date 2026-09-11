@@ -55,7 +55,7 @@ python -m services.gateway.main &        # starts on :8080 by default
 TOKEN=$(python scripts/generate_dev_token.py -q --tenant-id finance)
 export GATEWAY_TOKEN=$TOKEN
 
-pip install -r requirements-dev.txt      # pulls in locust
+poetry install                           # installs locust and test dependencies
 locust -f loadtests/bedrock/locustfile.py --headless \
     --host http://localhost:8080 -u 20 -r 5 -t 60s --exit-code-on-error 1
 ```

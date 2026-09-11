@@ -268,7 +268,7 @@ chunk, same simplification the non-streaming call already had since M0).
   exporter by default (zero external deps, spans print as JSON to
   stdout) or an OTLP HTTP exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is
   set (the exporter package is an optional extra, imported lazily --
-  see requirements.txt). Idempotent, same convention as
+  see pyproject.toml). Idempotent, same convention as
   `configure_logging()`. `set_span_attributes()` filters `None`s, since
   OTel attributes can't hold them and most telemetry fields are
   legitimately absent on some code paths.

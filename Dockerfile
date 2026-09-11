@@ -9,14 +9,16 @@
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+COPY pyproject.toml poetry.lock ./
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir 'poetry==2.1.4' \
+    && /opt/venv/bin/poetry install --only main --no-root
 
 FROM python:3.11-slim
 
 RUN groupadd --gid 1000 app && useradd --uid 1000 --gid app --shell /bin/bash --create-home app
 
-COPY --from=builder /install /usr/local
+COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY services/ ./services/
 COPY policies/ ./policies/
@@ -27,6 +29,7 @@ EXPOSE 8080
 
 ENV GATEWAY_HOST=0.0.0.0 \
     GATEWAY_PORT=8080 \
+    PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
