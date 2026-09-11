@@ -16,11 +16,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 
+from .api.admin_routes import build_admin_router
 from .api.routes import build_router
 from .auth.devkeys import load_or_create_dev_keypair
 from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .config import Settings, load_settings
 from .inference.bedrock_client import BedrockClient, ConverseClient
+from .policy.cache import PolicySnapshotCache
+from .policy.rate_limiter import TokenBucketRateLimiter
+from .policy.store import FilePolicyStore, PolicyStore
 from .telemetry.logging import configure_logging, get_logger, log_event
 from .telemetry.middleware import RequestContextMiddleware
 
@@ -47,6 +51,7 @@ def create_app(
     settings: Optional[Settings] = None,
     converse_client: Optional[ConverseClient] = None,
     token_verifier: Optional[TokenVerifier] = None,
+    policy_store: Optional[PolicyStore] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -59,8 +64,26 @@ def create_app(
         )
     if token_verifier is None:
         token_verifier = _build_default_token_verifier(settings)
+    if policy_store is None:
+        policy_store = FilePolicyStore(settings.tenant_policy_path)
 
-    routes = build_router(converse_client=converse_client, settings=settings, token_verifier=token_verifier)
+    policy_cache = PolicySnapshotCache(store=policy_store, ttl_s=settings.policy_cache_ttl_s)
+    rate_limiter = TokenBucketRateLimiter()
+
+    routes = build_router(
+        converse_client=converse_client,
+        settings=settings,
+        token_verifier=token_verifier,
+        policy_cache=policy_cache,
+        rate_limiter=rate_limiter,
+    )
+    admin_routes = build_admin_router(
+        policy_store=policy_store,
+        policy_cache=policy_cache,
+        settings=settings,
+        token_verifier=token_verifier,
+    )
+    routes = routes + admin_routes
 
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))

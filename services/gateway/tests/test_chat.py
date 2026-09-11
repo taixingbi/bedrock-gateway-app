@@ -39,6 +39,8 @@ class ChatEndpointTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1)
 
     def test_model_override_is_passed_through(self):
+        # sandbox has an empty model allowlist (no restriction) -- see
+        # policies/tenants.yaml -- so any model override is accepted.
         fake = FakeConverseClient()
         client = _client(fake)
 
@@ -48,7 +50,7 @@ class ChatEndpointTests(unittest.TestCase):
                 "model": "anthropic.claude-3-haiku",
                 "messages": [{"role": "user", "content": "hi"}],
             },
-            headers=_auth_headers(),
+            headers=_auth_headers(tenant_id="sandbox"),
         )
 
         self.assertEqual(fake.calls[0]["model_id"], "anthropic.claude-3-haiku")
@@ -63,7 +65,7 @@ class ChatEndpointTests(unittest.TestCase):
         client.post(
             "/v1/chat",
             json={"messages": [{"role": "user", "content": "hi"}]},
-            headers=_auth_headers(),
+            headers=_auth_headers(tenant_id="sandbox"),
         )
 
         self.assertEqual(fake.calls[0]["model_id"], settings.bedrock_model_id)

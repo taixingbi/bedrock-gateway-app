@@ -53,6 +53,10 @@ class Settings:
     chat_required_role: str
     admin_required_role: str
 
+    # M2 policy plane
+    tenant_policy_path: str
+    policy_cache_ttl_s: float
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -75,4 +79,6 @@ def load_settings() -> Settings:
         dev_jwt_keypair_path=os.environ.get("DEV_JWT_KEYPAIR_PATH", ".dev/jwt_keypair.json"),
         chat_required_role=os.environ.get("CHAT_REQUIRED_ROLE", "developer"),
         admin_required_role=os.environ.get("ADMIN_REQUIRED_ROLE", "platform_admin"),
+        tenant_policy_path=os.environ.get("TENANT_POLICY_PATH", "policies/tenants.yaml"),
+        policy_cache_ttl_s=_env_float("POLICY_CACHE_TTL_S", 30.0),
     )

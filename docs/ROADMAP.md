@@ -8,7 +8,7 @@ This file just tracks milestone status against that plan's section 25.
 |---|---|---|---|
 | M0 — Walking Skeleton | ECS + `/chat` + Bedrock + minimal telemetry | End-to-end inference works | **Done** |
 | M1 — Identity | OIDC/JWT + RBAC/ABAC + tenant resolution | Tenant identity trustworthy | **Done** |
-| M2 — Policy Plane | Tenant config + policy epoch + kill switch + push invalidation + bounded TTL | Policy changes have bounded propagation | Not started |
+| M2 — Policy Plane | Tenant config + policy epoch + kill switch + push invalidation + bounded TTL | Policy changes have bounded propagation | **Done** |
 | M3 — Safety | Input/output guardrails + fail-closed | Safety invariant holds | Not started |
 | M4 — Gateway Reliability | Cache + retry + jitter + circuit breaker + certified fallback + stream cancellation | Failure paths behave correctly | Not started |
 | M5 — Observability | OTel + latency/tokens/cost/SLO + PII-safe logging | Every request traceable | Not started |
@@ -100,3 +100,52 @@ M2–M4. No token refresh/introspection endpoint (out of scope for a
 gateway that only verifies tokens issued elsewhere). No admin API yet
 (lands with the kill switch in M2, since `PUT .../state` is the first
 admin action that needs one).
+
+## What M2 actually is
+
+`services/gateway/policy/`:
+
+- `models.py` — `TenantPolicy` (state, models allowlist, rpm_limit,
+  guardrail_policy, route_set, slo, policy_epoch) and `TenantState`
+  (`ACTIVE`/`THROTTLED`/`READ_ONLY`/`SUSPENDED`/`EMERGENCY_BLOCK`).
+  `BLOCKING_STATES = {SUSPENDED, EMERGENCY_BLOCK}` is the kill switch's
+  BLOCK branch (plan section 7); `THROTTLED` instead reduces the
+  effective rate limit (see `pipeline.enforce_rate_limit`); `READ_ONLY`
+  is reserved -- there's no write-vs-read distinction on `/v1/chat` yet
+  to apply it to.
+- `store.py` — `PolicyStore`/`MutablePolicyStore` Protocols (same seam
+  pattern as `ConverseClient`/`TokenVerifier`). `FilePolicyStore` reads
+  `policies/tenants.yaml` once at startup into an `InMemoryPolicyStore`,
+  standing in for the DynamoDB table in plan section 8.
+- `cache.py` — `PolicySnapshotCache`: bounded TTL (`POLICY_CACHE_TTL_S`,
+  default 30s) + `invalidate(tenant_id)` push invalidation, so "maximum
+  stale-policy lifetime <= ttl_s" holds even if a push is dropped.
+- `rate_limiter.py` — `TokenBucketRateLimiter`, strictly per-tenant
+  (isolation invariant applied to capacity, not just data).
+
+`pipeline.py` gained four stages, wired into `api/routes.py`'s `chat()`
+in this order: `resolve_policy` -> `enforce_kill_switch` ->
+`enforce_rate_limit` -> (body parsed/validated) -> `enforce_model_allowlist`.
+A blocked or unprovisioned tenant, or one over its rate limit, never
+reaches `converse_client.converse()` (tested directly on the fake).
+
+`api/admin_routes.py` is new: `PUT /v1/admin/tenants/{id}/state`
+(requires `ADMIN_REQUIRED_ROLE`, default `platform_admin`) flips a
+tenant's state, bumps its `policy_epoch`, and calls
+`policy_cache.invalidate()` -- the next `/v1/chat` for that tenant sees
+the change immediately, not after the TTL. `main.py`'s `create_app()`
+gained a `policy_store` parameter (same injectable-dependency pattern as
+`converse_client`/`token_verifier`).
+
+`tenant_id`/`policy_epoch`/`route_set` in the telemetry log are now real
+values, no longer placeholders.
+
+## What M2 deliberately does NOT do
+
+TPM/dollar-budget tracking (that's FinOps, M8) -- the rate limiter is
+requests-per-minute only. No DynamoDB/SNS/SQS (the file-backed store +
+in-process push-invalidation callback are the swappable stand-ins plan
+section 8 describes; `PolicyStore`/`MutablePolicyStore` are the seam a
+real control-plane-backed implementation plugs into later). `READ_ONLY`
+enforcement (no write-type endpoint exists yet to apply it to). Guardrails,
+cache, certified routing/fallback, streaming — still M3/M4.

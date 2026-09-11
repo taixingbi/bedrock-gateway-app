@@ -20,8 +20,11 @@ from .. import pipeline
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
 from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError, ConverseClient
+from ..policy.cache import PolicySnapshotCache
+from ..policy.rate_limiter import TokenBucketRateLimiter
 from ..telemetry.logging import get_logger, log_event
-from .schemas import ChatRequest, ChatResponse, ErrorBody, ErrorResponse, Usage
+from .errors import error_response as _error
+from .schemas import ChatRequest, ChatResponse, Usage
 
 _chat_logger = get_logger("gateway.chat")
 
@@ -36,7 +39,12 @@ _DEFAULT_ERROR_STATUS = (502, "UPSTREAM_ERROR")
 
 
 def build_router(
-    *, converse_client: ConverseClient, settings: Settings, token_verifier: TokenVerifier
+    *,
+    converse_client: ConverseClient,
+    settings: Settings,
+    token_verifier: TokenVerifier,
+    policy_cache: PolicySnapshotCache,
+    rate_limiter: TokenBucketRateLimiter,
 ) -> list[Route]:
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -49,6 +57,9 @@ def build_router(
                 request.headers.get("authorization"), token_verifier=token_verifier
             )
             pipeline.authorize(identity, required_role=settings.chat_required_role)
+            policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)
+            pipeline.enforce_kill_switch(policy)
+            pipeline.enforce_rate_limit(policy, rate_limiter=rate_limiter)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -62,7 +73,13 @@ def build_router(
         except ValidationError as exc:
             return _error(400, "INVALID_REQUEST", exc.errors()[0]["msg"], request_id)
 
-        model_id = chat_request.model or settings.bedrock_model_id
+        try:
+            model_id = pipeline.enforce_model_allowlist(
+                policy, requested_model=chat_request.model, default_model=settings.bedrock_model_id
+            )
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
         messages = [
             BedrockChatMessage(role=m.role, text=m.content) for m in chat_request.messages
         ]
@@ -80,7 +97,7 @@ def build_router(
             log_event(
                 _chat_logger, "ERROR", "chat request failed",
                 request_id=request_id, model=model_id, status=status_code,
-                tenant_id=identity.tenant_id,
+                tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
                 latency_ms=round((time.perf_counter() - start) * 1000, 2),
                 error=str(exc),
             )
@@ -91,13 +108,13 @@ def build_router(
             request_id=request_id,
             model=model_id,
             tenant_id=identity.tenant_id,
+            policy_epoch=policy.policy_epoch,
+            route_set=policy.route_set,
             # Fields below are placeholders until the corresponding milestone
-            # lands (M2 policy plane, M3 guardrails, M4 cache/fallback,
-            # M14 streaming). Kept here so the schema doesn't change shape
-            # later -- see section 17 of the plan.
-            policy_epoch=None,
+            # lands (M3 guardrails, M4 cache/fallback, M14 streaming). Kept
+            # here so the schema doesn't change shape later -- see section
+            # 17 of the plan.
             guardrail_version=None,
-            route_set=None,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             ttft_ms=None,
@@ -122,8 +139,3 @@ def build_router(
         Route("/healthz", healthz, methods=["GET"]),
         Route("/v1/chat", chat, methods=["POST"]),
     ]
-
-
-def _error(status_code: int, code: str, message: str, request_id: str) -> JSONResponse:
-    body = ErrorResponse(error=ErrorBody(code=code, message=message, request_id=request_id))
-    return JSONResponse(body.model_dump(), status_code=status_code)
