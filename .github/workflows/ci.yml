@@ -70,7 +70,10 @@ jobs:
   deploy-dev:
     name: Deploy to dev
     needs: [test, docker]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    # Auto-deploys on every push to main, same pattern as
+    # bedrock-gateway-infra's apply-dev -- there is no long-lived "dev"
+    # branch in this repo, so a trigger on refs/heads/dev never fired.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -89,12 +92,13 @@ jobs:
 
   deploy-prod:
     name: Deploy to prod
-    needs: [test, docker]
+    # Waits for dev to deploy successfully first, but that ordering
+    # alone grants nothing -- "prod" has its own required reviewers
+    # configured on its GitHub Environment, so this always pauses for a
+    # separate manual approval regardless of how dev went.
+    needs: [test, docker, deploy-dev]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Gated by the "prod" GitHub Environment's required reviewers (repo
-    # Settings -> Environments -> prod) -- configure that separately;
-    # Actions has no YAML-level equivalent of a manual approval gate.
     environment: prod
     permissions:
       id-token: write
