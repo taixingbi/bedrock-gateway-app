@@ -16,6 +16,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .. import pipeline
+from ..auth import aws_iam
+from ..auth.aws_iam import IamTenantResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
 from ..policy.cache import PolicySnapshotCache
@@ -33,13 +35,18 @@ def build_admin_router(
     policy_cache: PolicySnapshotCache,
     settings: Settings,
     token_verifier: TokenVerifier,
+    iam_tenant_resolver: IamTenantResolver,
 ) -> List[Route]:
     async def set_tenant_state(request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
             identity = pipeline.authenticate(
-                request.headers.get("authorization"), token_verifier=token_verifier
+                request.headers.get("authorization"),
+                token_verifier=token_verifier,
+                iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
+                iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
+                iam_tenant_resolver=iam_tenant_resolver,
             )
             pipeline.authorize(identity, required_role=settings.admin_required_role)
         except pipeline.PipelineError as exc:

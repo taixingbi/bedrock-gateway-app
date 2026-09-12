@@ -1,16 +1,24 @@
 """The authenticated caller (M1).
 
-`Identity` is built exclusively from verified JWT claims -- never from a
-client-supplied header. Plan section 5 calls this out explicitly: a
-request carrying `X-Tenant-ID: finance` must not be trusted, because that
-would let any caller claim any tenant. `tenant_id` here always comes from
-the `tenant_id` claim inside a token that already passed signature/issuer/
-audience/expiry verification (see jwt_verifier.py).
+`Identity` is built exclusively from a verified source -- a JWT's claims
+(see jwt_verifier.py) or, for `auth_type="aws_iam"`, the caller identity
+API Gateway's AWS_IAM authorizer already verified via SigV4 (see
+auth/aws_iam.py) -- never from an arbitrary client-supplied header.
+Plan section 5 calls this out for the JWT path explicitly: a request
+carrying `X-Tenant-ID: finance` must not be trusted, because that would
+let any caller claim any tenant. The same invariant holds for the IAM
+path: `services/gateway/pipeline.py`'s `authenticate()` only takes the
+`x-platform-principal-arn`/`x-platform-account-id` headers as
+trustworthy because the ALB in front of this app is private and only
+reachable through API Gateway's VPC Link, which overwrites those
+headers with its own verified values on the AWS_IAM route and strips
+them entirely on the JWT route (see infra/modules/api_gateway) -- a
+client can never set them directly.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 class AuthError(Exception):
@@ -39,6 +47,8 @@ class Identity:
     tenant_id: str
     application_id: str
     roles: List[str] = field(default_factory=list)
+    auth_type: str = "jwt"  # "jwt" | "aws_iam"
+    account_id: Optional[str] = None
 
     def has_role(self, role: str) -> bool:
         return role in self.roles

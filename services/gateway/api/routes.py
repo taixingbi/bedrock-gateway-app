@@ -18,6 +18,8 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .. import pipeline
+from ..auth import aws_iam
+from ..auth.aws_iam import IamTenantResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..cache.keys import build_cache_key, normalize_messages
 from ..cache.store import CachedResponse, ResponseCache
@@ -54,6 +56,7 @@ def build_router(
     router: CertifiedRouter,
     settings: Settings,
     token_verifier: TokenVerifier,
+    iam_tenant_resolver: IamTenantResolver,
     policy_cache: PolicySnapshotCache,
     rate_limiter: TokenBucketRateLimiter,
     guardrail_client: GuardrailClient,
@@ -73,7 +76,11 @@ def build_router(
 
             try:
                 identity = pipeline.authenticate(
-                    request.headers.get("authorization"), token_verifier=token_verifier
+                    request.headers.get("authorization"),
+                    token_verifier=token_verifier,
+                    iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
+                    iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
+                    iam_tenant_resolver=iam_tenant_resolver,
                 )
                 pipeline.authorize(identity, required_role=settings.chat_required_role)
                 policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)

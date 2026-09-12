@@ -52,6 +52,7 @@ class Settings:
     dev_jwt_keypair_path: str
     chat_required_role: str
     admin_required_role: str
+    iam_tenants_path: str  # AWS_IAM/SigV4 auth path -- see auth/aws_iam.py
 
     # M2 policy plane
     tenant_policy_path: str
@@ -96,6 +97,7 @@ def load_settings() -> Settings:
         dev_jwt_keypair_path=os.environ.get("DEV_JWT_KEYPAIR_PATH", ".dev/jwt_keypair.json"),
         chat_required_role=os.environ.get("CHAT_REQUIRED_ROLE", "developer"),
         admin_required_role=os.environ.get("ADMIN_REQUIRED_ROLE", "platform_admin"),
+        iam_tenants_path=os.environ.get("IAM_TENANTS_PATH", "policies/iam_tenants.yaml"),
         tenant_policy_path=os.environ.get("TENANT_POLICY_PATH", "policies/tenants.yaml"),
         policy_cache_ttl_s=_env_float("POLICY_CACHE_TTL_S", 30.0),
         route_set_config_path=os.environ.get("ROUTE_SET_CONFIG_PATH", "policies/route_sets.yaml"),

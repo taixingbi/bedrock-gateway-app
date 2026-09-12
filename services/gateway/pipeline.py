@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from .auth import rbac
+from .auth.aws_iam import IamTenantResolver
 from .auth.identity import AuthError, AuthorizationError, Identity, identity_from_claims
 from .auth.jwt_verifier import TokenVerifier
 from .guardrails.client import GuardrailClient
@@ -42,13 +43,57 @@ class PipelineError(Exception):
         self.code = code
 
 
-def authenticate(authorization_header: Optional[str], *, token_verifier: TokenVerifier) -> Identity:
-    """Stage 1: Auth. Verifies the bearer token and derives an Identity.
+def authenticate_iam(
+    principal_arn: str, account_id: Optional[str], *, iam_tenant_resolver: IamTenantResolver
+) -> Identity:
+    """Stage 1 (AWS_IAM path): maps an already SigV4-verified IAM
+    principal ARN to an Identity via `policies/iam_tenants.yaml`.
 
-    tenant_id always comes from the verified token's claims -- a
-    request-supplied header (e.g. X-Tenant-ID) is never consulted, so a
-    caller cannot claim a tenant it doesn't hold a token for.
+    `principal_arn` must only ever come from a request that reached this
+    app through API Gateway's AWS_IAM route, which overwrites the
+    x-platform-principal-arn/x-platform-account-id headers with its own
+    verified $context.identity.* values -- see auth/aws_iam.py's module
+    docstring for why that's safe to trust here.
     """
+    try:
+        grant = iam_tenant_resolver.resolve(principal_arn)
+    except AuthError as exc:
+        raise PipelineError(403, exc.code, str(exc)) from exc
+
+    return Identity(
+        sub=principal_arn,
+        tenant_id=grant.tenant_id,
+        application_id=grant.application_id,
+        roles=grant.roles,
+        auth_type="aws_iam",
+        account_id=account_id,
+    )
+
+
+def authenticate(
+    authorization_header: Optional[str],
+    *,
+    token_verifier: TokenVerifier,
+    iam_principal_arn: Optional[str] = None,
+    iam_account_id: Optional[str] = None,
+    iam_tenant_resolver: Optional[IamTenantResolver] = None,
+) -> Identity:
+    """Stage 1: Auth. Derives an Identity from whichever verified source
+    the request arrived through.
+
+    If `iam_principal_arn` is set, the caller reached this app through
+    API Gateway's AWS_IAM route (see authenticate_iam's docstring) and
+    that takes precedence -- no bearer token is expected on that route.
+    Otherwise, falls back to the existing JWT path: tenant_id always
+    comes from the verified token's claims, never a request-supplied
+    header (e.g. X-Tenant-ID), so a caller cannot claim a tenant it
+    doesn't hold a token for.
+    """
+    if iam_principal_arn:
+        if iam_tenant_resolver is None:
+            raise PipelineError(500, "IAM_AUTH_NOT_CONFIGURED", "aws_iam auth is not configured")
+        return authenticate_iam(iam_principal_arn, iam_account_id, iam_tenant_resolver=iam_tenant_resolver)
+
     if not authorization_header or not authorization_header.startswith("Bearer "):
         raise PipelineError(401, "UNAUTHENTICATED", "missing bearer token")
 

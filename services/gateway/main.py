@@ -19,6 +19,7 @@ from starlette.middleware import Middleware
 
 from .api.admin_routes import build_admin_router
 from .api.routes import build_router
+from .auth.aws_iam import FileIamTenantResolver, IamTenantResolver
 from .auth.devkeys import load_or_create_dev_keypair
 from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .cache.store import InMemoryResponseCache, ResponseCache
@@ -66,6 +67,7 @@ def create_app(
     route_sets: Optional[Dict[str, RouteSet]] = None,
     tracer: Optional[trace.Tracer] = None,
     debug_capture_store: Optional[DebugCaptureStore] = None,
+    iam_tenant_resolver: Optional[IamTenantResolver] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -78,6 +80,8 @@ def create_app(
         )
     if token_verifier is None:
         token_verifier = _build_default_token_verifier(settings)
+    if iam_tenant_resolver is None:
+        iam_tenant_resolver = FileIamTenantResolver(settings.iam_tenants_path)
     if policy_store is None:
         policy_store = FilePolicyStore(settings.tenant_policy_path)
     if guardrail_client is None:
@@ -110,6 +114,7 @@ def create_app(
         router=router,
         settings=settings,
         token_verifier=token_verifier,
+        iam_tenant_resolver=iam_tenant_resolver,
         policy_cache=policy_cache,
         rate_limiter=rate_limiter,
         guardrail_client=guardrail_client,
@@ -123,6 +128,7 @@ def create_app(
         policy_cache=policy_cache,
         settings=settings,
         token_verifier=token_verifier,
+        iam_tenant_resolver=iam_tenant_resolver,
     )
     routes = routes + admin_routes
 
