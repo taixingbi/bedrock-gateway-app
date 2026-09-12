@@ -73,6 +73,13 @@ jobs:
     # Auto-deploys on every push to main, same pattern as
     # bedrock-gateway-infra's apply-dev -- there is no long-lived "dev"
     # branch in this repo, so a trigger on refs/heads/dev never fired.
+    #
+    # Prod is deliberately NOT triggered from this push at all (not
+    # even behind an approval gate on the same run) -- see
+    # promote-prod.yml. A push to main only ever proves out dev; a
+    # prod release is always a separate, explicit action that promotes
+    # a specific already-validated image, never a rebuild of whatever
+    # main happens to be at approval time.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
@@ -89,27 +96,3 @@ jobs:
           ecs-cluster: gateway-dev-cluster
           ecs-service: gateway-dev-service
           task-definition-family: gateway-dev
-
-  deploy-prod:
-    name: Deploy to prod
-    # Waits for dev to deploy successfully first, but that ordering
-    # alone grants nothing -- "prod" has its own required reviewers
-    # configured on its GitHub Environment, so this always pauses for a
-    # separate manual approval regardless of how dev went.
-    needs: [test, docker, deploy-dev]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: prod
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/deploy-ecs
-        with:
-          aws-region: us-east-1
-          deploy-role-arn: ${{ vars.AWS_APP_DEPLOY_ROLE_ARN_PROD }}
-          ecr-repository: gateway-prod
-          ecs-cluster: gateway-prod-cluster
-          ecs-service: gateway-prod-service
-          task-definition-family: gateway-prod

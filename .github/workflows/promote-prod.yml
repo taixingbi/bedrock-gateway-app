@@ -1,0 +1,91 @@
+name: Promote to prod
+
+# Deliberately separate from ci.yml's push trigger: a prod release is
+# an explicit action someone takes after validating a specific image
+# in dev, never an automatic side effect of pushing to main. This
+# workflow never rebuilds -- it retags and pushes the exact image
+# bytes gateway-dev already ran, so what gets certified in dev is
+# provably what reaches prod.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >
+          Tag already pushed to gateway-dev by a "Deploy to dev" run,
+          e.g. "sha-<full 40-char commit SHA>". Copy it from that run's
+          logs or `aws ecr describe-images --repository-name
+          gateway-dev` -- don't type one from memory.
+        required: true
+        type: string
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.image_tag }} to prod
+    runs-on: ubuntu-latest
+    # Belt-and-suspenders: workflow_dispatch already requires someone
+    # with write access to click "Run workflow", and this environment's
+    # required reviewer rule (repo Settings -> Environments -> prod)
+    # still forces a separate approval on top of that.
+    environment: prod
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Assume dev role to read the validated image
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APP_DEPLOY_ROLE_ARN_DEV }}
+          aws-region: us-east-1
+
+      - id: ecr-login-dev
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull the exact image dev validated
+        run: |
+          docker pull "${{ steps.ecr-login-dev.outputs.registry }}/gateway-dev:${{ inputs.image_tag }}"
+
+      - name: Assume prod role to push + deploy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APP_DEPLOY_ROLE_ARN_PROD }}
+          aws-region: us-east-1
+
+      # Re-login is required, not cosmetic: the docker credential
+      # helper's token so far still carries the dev role's (read-only,
+      # gateway-dev-scoped) permissions. This exchanges it for a token
+      # under the now-active prod role, which is what actually allows
+      # the push below.
+      - id: ecr-login-prod
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Retag and push to gateway-prod (no rebuild -- same image bytes)
+        id: push
+        run: |
+          SRC="${{ steps.ecr-login-dev.outputs.registry }}/gateway-dev:${{ inputs.image_tag }}"
+          DST="${{ steps.ecr-login-prod.outputs.registry }}/gateway-prod:${{ inputs.image_tag }}"
+          docker tag "$SRC" "$DST"
+          docker push "$DST"
+          echo "image=$DST" >> "$GITHUB_OUTPUT"
+
+      - name: Download current prod task definition
+        run: |
+          aws ecs describe-task-definition --task-definition gateway-prod --query taskDefinition \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-definition.json
+
+      - name: Render new image into task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: gateway-api
+          image: ${{ steps.push.outputs.image }}
+
+      - name: Deploy task definition to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: gateway-prod-service
+          cluster: gateway-prod-cluster
+          wait-for-service-stability: true
