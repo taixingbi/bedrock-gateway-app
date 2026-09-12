@@ -66,3 +66,46 @@ jobs:
       - name: Stop container
         if: always()
         run: docker rm -f gateway-api-ci
+
+  deploy-dev:
+    name: Deploy to dev
+    needs: [test, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/deploy-ecs
+        with:
+          aws-region: us-east-1
+          deploy-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
+          ecr-repository: gateway-dev
+          ecs-cluster: gateway-dev-cluster
+          ecs-service: gateway-dev-service
+          task-definition-family: gateway-dev
+
+  deploy-prod:
+    name: Deploy to prod
+    needs: [deploy-dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Gated by the "prod" GitHub Environment's required reviewers (repo
+    # Settings -> Environments -> prod) -- configure that separately;
+    # Actions has no YAML-level equivalent of a manual approval gate.
+    environment: prod
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/deploy-ecs
+        with:
+          aws-region: us-east-1
+          deploy-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN_PROD }}
+          ecr-repository: gateway-prod
+          ecs-cluster: gateway-prod-cluster
+          ecs-service: gateway-prod-service
+          task-definition-family: gateway-prod
