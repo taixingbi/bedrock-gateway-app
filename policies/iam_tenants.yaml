@@ -1,0 +1,40 @@
+# ============================================================
+# COPY -- not the source of truth. Canonical copy lives in
+# github.com/taixingbi/bedrock-gateway-policies (environments/dev/).
+# Sync by running scripts/sync-policies.sh against a checkout of
+# that repo. This copy exists only so `docker build` here keeps
+# working during the app/infra/policies repo split -- once the
+# gateway has a working S3/DynamoDB-backed PolicyStore, this
+# directory and the COPY step in Dockerfile go away entirely.
+# ============================================================
+# IAM principal -> tenant policy mapping (AWS_IAM/SigV4 auth path).
+#
+# The JWT path gets tenant_id/application_id/roles directly from a
+# verified token's claims (see auth/identity.py). A verified AWS IAM
+# principal ARN carries none of that, so this file is the IAM-path
+# equivalent of tenants.yaml: it says which tenant policy (still looked
+# up by tenant_id in tenants.yaml, unchanged) an already-authenticated
+# IAM caller gets mapped to, and which roles they're granted for
+# pipeline.authorize()'s RBAC check.
+#
+# Loaded once at startup by FileIamTenantResolver (see auth/aws_iam.py).
+# An ARN ending in "*" matches any principal ARN sharing that prefix --
+# used for assumed-role ARNs, since the session-name suffix
+# ("arn:...:assumed-role/<role>/<session-name>") is caller-chosen and
+# can't be enumerated in advance.
+#
+# A principal calling in via the AWS_IAM route with no entry here 403s
+# with UNKNOWN_IAM_PRINCIPAL -- add an entry (and grant that principal
+# execute-api:Invoke on the /iam/* route, see infra/README.md) before
+# a new caller can use this path.
+
+iam_principals:
+  "arn:aws:iam::646821141010:role/team-a-ai-client":
+    tenant_id: team-a
+    application_id: team-a-ai-client
+    roles: [developer]
+
+  "arn:aws:sts::646821141010:assumed-role/team-a-ai-client/*":
+    tenant_id: team-a
+    application_id: team-a-ai-client
+    roles: [developer]

@@ -81,7 +81,7 @@ jobs:
       - uses: ./.github/actions/deploy-ecs
         with:
           aws-region: us-east-1
-          deploy-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
+          deploy-role-arn: ${{ vars.AWS_APP_DEPLOY_ROLE_ARN_DEV }}
           ecr-repository: gateway-dev
           ecs-cluster: gateway-dev-cluster
           ecs-service: gateway-dev-service
@@ -104,7 +104,7 @@ jobs:
       - uses: ./.github/actions/deploy-ecs
         with:
           aws-region: us-east-1
-          deploy-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN_PROD }}
+          deploy-role-arn: ${{ vars.AWS_APP_DEPLOY_ROLE_ARN_PROD }}
           ecr-repository: gateway-prod
           ecs-cluster: gateway-prod-cluster
           ecs-service: gateway-prod-service

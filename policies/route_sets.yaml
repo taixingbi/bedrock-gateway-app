@@ -1,0 +1,33 @@
+# ============================================================
+# COPY -- not the source of truth. Canonical copy lives in
+# github.com/taixingbi/bedrock-gateway-policies (environments/dev/).
+# Sync by running scripts/sync-policies.sh against a checkout of
+# that repo. This copy exists only so `docker build` here keeps
+# working during the app/infra/policies repo split -- once the
+# gateway has a working S3/DynamoDB-backed PolicyStore, this
+# directory and the COPY step in Dockerfile go away entirely.
+# ============================================================
+# Certified route sets (M4, plan section 13). A tenant's fallback
+# candidates always come from here -- never an arbitrary model a client
+# might request. Referenced by tenant policy's `route_set` field (see
+# policies/tenants.yaml).
+#
+# "Certified" here just means "listed in this file" -- a real deployment
+# would gate entries behind the evaluation/certification pipeline in plan
+# section 21 (M9) before they're allowed here.
+#
+# Only Nova Micro is confirmed accessible on this account (646821141010,
+# us-east-1) right now, so there are no fallbacks configured yet -- a
+# route_set with an empty fallback list behaves like a direct call (see
+# routing/router.py). Add a fallback model's inference profile ID here
+# once it's confirmed with `aws bedrock list-inference-profiles` +
+# `aws bedrock-runtime converse` (see docs/LOAD_TESTING.md).
+
+route_sets:
+  finance-chat-v1:
+    primary: us.amazon.nova-micro-v1:0
+    fallbacks: []
+
+  search-chat-v1:
+    primary: us.amazon.nova-micro-v1:0
+    fallbacks: []

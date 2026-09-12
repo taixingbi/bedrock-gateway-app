@@ -3,14 +3,15 @@ description: >
   Build the gateway image, push it to ECR tagged with the commit SHA,
   and roll it out to the given ECS service by registering a new task
   definition revision. Shared by the dev and prod deploy jobs in
-  .github/workflows/ci.yml -- see infra/README.md for the one-time AWS
-  setup (Terraform apply + GitHub Environment) this assumes exists.
+  .github/workflows/ci.yml -- see github.com/taixingbi/bedrock-gateway-infra
+  for the ECR/ECS/OIDC-role Terraform this assumes already exists and
+  applied.
 
 inputs:
   aws-region:
     required: true
   deploy-role-arn:
-    description: IAM role this job assumes via GitHub OIDC (see infra/modules/github_oidc).
+    description: IAM role this job assumes via GitHub OIDC (gha-app-deploy-{dev,prod}, defined in bedrock-gateway-infra's modules/github_oidc).
     required: true
   ecr-repository:
     required: true
