@@ -38,3 +38,10 @@ iam_principals:
     tenant_id: team-a
     application_id: team-a-ai-client
     roles: [developer]
+
+  # Manual curl/smoke testing via the IAM user's own long-term
+  # credentials (dev only -- do not add a real IAM user here in prod).
+  "arn:aws:iam::646821141010:user/taixingbi":
+    tenant_id: team-a
+    application_id: manual-smoke-test
+    roles: [developer]
