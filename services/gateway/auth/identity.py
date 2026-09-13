@@ -61,11 +61,24 @@ def identity_from_claims(claims: dict) -> Identity:
     verifies cryptographically but doesn't carry a tenant_id is still
     useless (and dangerous) here, since tenant resolution has nowhere
     else to fall back to (see module docstring).
+
+    Two claim shapes are accepted, checked in this order:
+      - Plain `tenant_id`/`application_id`/`roles` -- what
+        auth/devkeys.py's mint_dev_token() produces, and the only
+        shape before a real IdP existed.
+      - Cognito's shape -- `custom:tenant_id`/`custom:application_id`
+        (Cognito always prefixes custom schema attributes this way in
+        the token) and `cognito:groups` for roles (a real JSON array
+        claim from native Cognito group membership, not something we
+        had to invent a custom attribute for -- Cognito custom
+        attributes can't be arrays at all, only groups can).
     """
     sub = claims.get("sub")
-    tenant_id = claims.get("tenant_id")
-    application_id = claims.get("application_id")
-    roles = claims.get("roles") or []
+    tenant_id = claims.get("tenant_id") or claims.get("custom:tenant_id")
+    application_id = claims.get("application_id") or claims.get("custom:application_id")
+    roles = claims.get("roles")
+    if roles is None:
+        roles = claims.get("cognito:groups") or []
 
     missing = [
         name
