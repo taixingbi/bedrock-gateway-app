@@ -69,6 +69,13 @@ class Settings:
     otel_exporter_otlp_endpoint: str
     debug_capture_ttl_s: float
 
+    # M7 async jobs -- both empty by default (in-memory JobStore/JobQueue
+    # instead of the real DynamoDB/SQS-backed ones, see main.py). Set in
+    # every environment that has bedrock-gateway-infra's jobs queue/table
+    # applied.
+    jobs_queue_url: str
+    jobs_table_name: str
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -107,4 +114,6 @@ def load_settings() -> Settings:
         circuit_breaker_reset_timeout_s=_env_float("CIRCUIT_BREAKER_RESET_TIMEOUT_S", 30.0),
         otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         debug_capture_ttl_s=_env_float("DEBUG_CAPTURE_TTL_S", 900.0),
+        jobs_queue_url=os.environ.get("JOBS_QUEUE_URL", ""),
+        jobs_table_name=os.environ.get("JOBS_TABLE_NAME", ""),
     )

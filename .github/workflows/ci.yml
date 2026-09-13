@@ -96,3 +96,15 @@ jobs:
           ecs-cluster: gateway-dev-cluster
           ecs-service: gateway-dev-service
           task-definition-family: gateway-dev
+
+      # M7: same image deploy-ecs just built and pushed above, run as
+      # the worker instead of gateway-api (see bedrock-gateway-infra's
+      # modules/worker_service) -- not a second build.
+      - uses: ./.github/actions/deploy-ecs-task
+        with:
+          ecr-repository: gateway-dev
+          image-tag: sha-${{ github.sha }}
+          ecs-cluster: gateway-dev-cluster
+          ecs-service: gateway-dev-worker-service
+          task-definition-family: gateway-dev-worker
+          container-name: gateway-worker

@@ -32,6 +32,12 @@ jobs:
       id-token: write
       contents: read
     steps:
+      # Needed for the local ./.github/actions/deploy-ecs-task reference
+      # below -- the composite action's files must exist on disk before
+      # `uses:` can resolve them, this workflow had no reason to check
+      # out the repo before M7 added that step.
+      - uses: actions/checkout@v4
+
       - name: Assume dev role to read the validated image
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -89,3 +95,15 @@ jobs:
           service: gateway-prod-service
           cluster: gateway-prod-cluster
           wait-for-service-stability: true
+
+      # M7: same image just retagged/pushed above, run as the worker
+      # instead of gateway-api -- not a second build or a second promote
+      # approval, just a second ECS service pointed at the same bytes.
+      - uses: ./.github/actions/deploy-ecs-task
+        with:
+          ecr-repository: gateway-prod
+          image-tag: ${{ inputs.image_tag }}
+          ecs-cluster: gateway-prod-cluster
+          ecs-service: gateway-prod-worker-service
+          task-definition-family: gateway-prod-worker
+          container-name: gateway-worker

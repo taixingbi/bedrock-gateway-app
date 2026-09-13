@@ -1,0 +1,58 @@
+name: Deploy task definition to ECS (image already pushed)
+description: >
+  Point an ECS service at an image tag some earlier step in the same job
+  already built and pushed -- registers a new task definition revision
+  and updates the service, without rebuilding. Used to deploy the M7
+  worker service off the exact same image gateway-api's deploy-ecs (or
+  promote-prod.yml's retag-and-push) step just produced for that same
+  ecr-repository/image-tag: same codebase, different container command,
+  so there is nothing to rebuild.
+
+inputs:
+  ecr-repository:
+    required: true
+  image-tag:
+    required: true
+  ecs-cluster:
+    required: true
+  ecs-service:
+    required: true
+  task-definition-family:
+    required: true
+  container-name:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # No configure-aws-credentials here: this always runs later in a job
+    # that already assumed the right role for an earlier build/push/
+    # deploy step, and that role's credentials remain active for the
+    # rest of the job.
+    - id: ecr-login
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Download current task definition
+      shell: bash
+      env:
+        FAMILY: ${{ inputs.task-definition-family }}
+      run: |
+        aws ecs describe-task-definition --task-definition "$FAMILY" --query taskDefinition \
+          | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+          > task-definition.json
+
+    - name: Render new image into task definition
+      id: render
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition.json
+        container-name: ${{ inputs.container-name }}
+        image: ${{ steps.ecr-login.outputs.registry }}/${{ inputs.ecr-repository }}:${{ inputs.image-tag }}
+
+    - name: Deploy task definition to ECS
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      with:
+        task-definition: ${{ steps.render.outputs.task-definition }}
+        service: ${{ inputs.ecs-service }}
+        cluster: ${{ inputs.ecs-cluster }}
+        wait-for-service-stability: true

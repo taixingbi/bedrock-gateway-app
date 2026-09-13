@@ -66,3 +66,35 @@ class ErrorBody(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
+
+
+class JobRequest(BaseModel):
+    """POST /v1/jobs (M7, plan section 15). Same shape as ChatRequest
+    minus `stream` -- a job is inherently non-interactive."""
+
+    model: Optional[str] = Field(default=None)
+    messages: List[ChatMessage] = Field(min_length=1)
+    max_tokens: int = Field(default=1024, ge=1, le=8192)
+    temperature: float = Field(default=0.7, ge=0.0, le=1.0)
+
+    @field_validator("messages")
+    @classmethod
+    def _last_message_is_user(cls, messages: List[ChatMessage]) -> List[ChatMessage]:
+        if messages[-1].role != "user":
+            raise ValueError("the last message must have role='user'")
+        return messages
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    model: str
+    output: Optional[str] = None
+    usage: Optional[Usage] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None

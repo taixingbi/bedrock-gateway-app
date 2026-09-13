@@ -18,6 +18,7 @@ from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 
 from .api.admin_routes import build_admin_router
+from .api.jobs_routes import build_jobs_router
 from .api.routes import build_router
 from .auth.aws_iam import FileIamTenantResolver, IamTenantResolver
 from .auth.devkeys import load_or_create_dev_keypair
@@ -27,6 +28,8 @@ from .config import Settings, load_settings
 from .guardrails.basic_guardrail import BasicGuardrailClient
 from .guardrails.client import GuardrailClient
 from .inference.bedrock_client import BedrockClient, ConverseClient
+from .jobs.queue import InMemoryJobQueue, JobQueue, SqsJobQueue
+from .jobs.store import DynamoDbJobStore, InMemoryJobStore, JobStore
 from .policy.cache import PolicySnapshotCache
 from .policy.rate_limiter import TokenBucketRateLimiter
 from .policy.store import FilePolicyStore, PolicyStore
@@ -68,6 +71,8 @@ def create_app(
     tracer: Optional[trace.Tracer] = None,
     debug_capture_store: Optional[DebugCaptureStore] = None,
     iam_tenant_resolver: Optional[IamTenantResolver] = None,
+    job_store: Optional[JobStore] = None,
+    job_queue: Optional[JobQueue] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -109,6 +114,18 @@ def create_app(
         )
     if debug_capture_store is None:
         debug_capture_store = DebugCaptureStore(ttl_s=settings.debug_capture_ttl_s)
+    if job_store is None:
+        job_store = (
+            DynamoDbJobStore(table_name=settings.jobs_table_name, region=settings.aws_region)
+            if settings.jobs_table_name
+            else InMemoryJobStore()
+        )
+    if job_queue is None:
+        job_queue = (
+            SqsJobQueue(queue_url=settings.jobs_queue_url, region=settings.aws_region)
+            if settings.jobs_queue_url
+            else InMemoryJobQueue()
+        )
 
     routes = build_router(
         router=router,
@@ -130,7 +147,17 @@ def create_app(
         token_verifier=token_verifier,
         iam_tenant_resolver=iam_tenant_resolver,
     )
-    routes = routes + admin_routes
+    jobs_routes = build_jobs_router(
+        settings=settings,
+        token_verifier=token_verifier,
+        iam_tenant_resolver=iam_tenant_resolver,
+        policy_cache=policy_cache,
+        rate_limiter=rate_limiter,
+        guardrail_client=guardrail_client,
+        job_store=job_store,
+        job_queue=job_queue,
+    )
+    routes = routes + admin_routes + jobs_routes
 
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
