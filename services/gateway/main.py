@@ -39,6 +39,7 @@ from .telemetry.debug_capture import DebugCaptureStore
 from .telemetry.logging import configure_logging, get_logger, log_event
 from .telemetry.middleware import RequestContextMiddleware
 from .telemetry.otel import configure_tracing
+from .usage.store import DynamoDbUsageStore, InMemoryUsageStore, UsageStore
 
 _logger = get_logger("gateway.main")
 
@@ -73,6 +74,7 @@ def create_app(
     iam_tenant_resolver: Optional[IamTenantResolver] = None,
     job_store: Optional[JobStore] = None,
     job_queue: Optional[JobQueue] = None,
+    usage_store: Optional[UsageStore] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -126,6 +128,12 @@ def create_app(
             if settings.jobs_queue_url
             else InMemoryJobQueue()
         )
+    if usage_store is None:
+        usage_store = (
+            DynamoDbUsageStore(table_name=settings.usage_table_name, region=settings.aws_region)
+            if settings.usage_table_name
+            else InMemoryUsageStore()
+        )
 
     routes = build_router(
         router=router,
@@ -139,6 +147,7 @@ def create_app(
         circuit_breaker=circuit_breaker,
         tracer=tracer,
         debug_capture_store=debug_capture_store,
+        usage_store=usage_store,
     )
     admin_routes = build_admin_router(
         policy_store=policy_store,
@@ -146,6 +155,7 @@ def create_app(
         settings=settings,
         token_verifier=token_verifier,
         iam_tenant_resolver=iam_tenant_resolver,
+        usage_store=usage_store,
     )
     jobs_routes = build_jobs_router(
         settings=settings,
@@ -156,6 +166,7 @@ def create_app(
         guardrail_client=guardrail_client,
         job_store=job_store,
         job_queue=job_queue,
+        usage_store=usage_store,
     )
     routes = routes + admin_routes + jobs_routes
 

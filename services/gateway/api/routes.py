@@ -36,6 +36,7 @@ from ..telemetry.debug_capture import DebugCaptureStore
 from ..telemetry.logging import get_logger, log_event
 from ..telemetry.otel import set_span_attributes
 from ..telemetry.slo import slo_breached
+from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
 from .schemas import ChatRequest, ChatResponse, Usage
 
@@ -64,6 +65,7 @@ def build_router(
     circuit_breaker: CircuitBreaker,
     tracer: trace.Tracer,
     debug_capture_store: DebugCaptureStore,
+    usage_store: UsageStore,
 ) -> list[Route]:
     async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -86,6 +88,7 @@ def build_router(
                 policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)
                 pipeline.enforce_kill_switch(policy)
                 pipeline.enforce_rate_limit(policy, rate_limiter=rate_limiter)
+                pipeline.enforce_budget(policy, usage_store=usage_store, month=current_month())
             except pipeline.PipelineError as exc:
                 set_span_attributes(span, status=exc.status_code, error=str(exc))
                 return _error(exc.status_code, exc.code, str(exc), request_id)
@@ -191,6 +194,7 @@ def build_router(
                 estimated_cost = estimate_cost(
                     cached.model_id, input_tokens=cached.input_tokens, output_tokens=cached.output_tokens
                 )
+                usage_store.add_and_get(identity.tenant_id, current_month(), estimated_cost)
                 if policy.debug_capture_enabled:
                     debug_capture_store.capture(
                         request_id=request_id, tenant_id=identity.tenant_id,
@@ -303,6 +307,7 @@ def build_router(
             estimated_cost = estimate_cost(
                 routed.model_id, input_tokens=result.input_tokens, output_tokens=result.output_tokens
             )
+            usage_store.add_and_get(identity.tenant_id, current_month(), estimated_cost)
             breached = slo_breached(policy, result.latency_ms)
 
             set_span_attributes(

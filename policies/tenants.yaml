@@ -33,6 +33,7 @@ tenants:
     slo:
       p95_latency_ms: 3000
     policy_epoch: 1
+    monthly_budget: 10000 # M8 FinOps hard limit, USD/month
 
   search:
     state: ACTIVE
@@ -63,3 +64,7 @@ tenants:
     rpm_limit: 60
     guardrail_policy: standard-v1
     policy_epoch: 1
+    # Deliberately tiny -- M8 smoke-test budget, small enough that a
+    # single real chat/job call exhausts it, so BUDGET_EXCEEDED can be
+    # demonstrated live with one extra curl rather than thousands.
+    monthly_budget: 0.000002

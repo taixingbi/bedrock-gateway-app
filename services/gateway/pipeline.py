@@ -25,6 +25,7 @@ from .guardrails.models import GuardrailAction, GuardrailDecision
 from .policy.cache import PolicySnapshotCache
 from .policy.models import BLOCKING_STATES, TenantPolicy, TenantState, UnknownTenantError
 from .policy.rate_limiter import TokenBucketRateLimiter
+from .usage.store import UsageStore
 
 # THROTTLED tenants get 1/5th their configured rpm_limit rather than being
 # blocked outright -- SUSPENDED/EMERGENCY_BLOCK (the kill switch) is what
@@ -149,6 +150,24 @@ def enforce_rate_limit(policy: TenantPolicy, *, rate_limiter: TokenBucketRateLim
     if not rate_limiter.allow(policy.tenant_id, rpm_limit=effective_limit):
         raise PipelineError(
             429, "QUOTA_EXCEEDED", f"tenant '{policy.tenant_id}' exceeded its rate limit"
+        )
+
+
+def enforce_budget(policy: TenantPolicy, *, usage_store: UsageStore, month: str) -> None:
+    """Stage 4b: FinOps hard budget (M8, plan section 20). None means
+    unlimited -- most tenants don't opt in. Checked before the model is
+    ever called; the actual spend increment happens only after a
+    successful response (api/routes.py / jobs/processor.py), not here,
+    so a request that itself fails or is blocked never counts against
+    the budget it was checked against."""
+    if policy.monthly_budget is None:
+        return
+    current = usage_store.get(policy.tenant_id, month)
+    if current >= policy.monthly_budget:
+        raise PipelineError(
+            429,
+            "BUDGET_EXCEEDED",
+            f"tenant '{policy.tenant_id}' exceeded its monthly budget (${policy.monthly_budget:.2f})",
         )
 
 

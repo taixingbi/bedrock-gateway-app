@@ -25,7 +25,9 @@ from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationErro
 from ..policy.cache import PolicySnapshotCache
 from ..policy.models import BLOCKING_STATES
 from ..routing.router import AllRoutesUnavailableError, CertifiedRouter
+from ..telemetry.cost import estimate_cost
 from ..telemetry.logging import get_logger, log_event
+from ..usage.store import UsageStore, current_month
 from .models import JobNotFoundError, JobStatus
 from .store import JobStore
 
@@ -39,6 +41,7 @@ def process_one(
     policy_cache: PolicySnapshotCache,
     guardrail_client: GuardrailClient,
     router: CertifiedRouter,
+    usage_store: UsageStore,
 ) -> None:
     job_id = json.loads(message_body)["job_id"]
 
@@ -99,6 +102,10 @@ def process_one(
         usage_input_tokens=result.input_tokens,
         usage_output_tokens=result.output_tokens,
     ))
+    estimated_cost = estimate_cost(
+        routed.model_id, input_tokens=result.input_tokens, output_tokens=result.output_tokens
+    )
+    usage_store.add_and_get(job.tenant_id, current_month(), estimated_cost)
     log_event(
         _logger, "INFO", "job completed",
         job_id=job_id, tenant_id=job.tenant_id, model=routed.model_id, status=JobStatus.SUCCEEDED.value,

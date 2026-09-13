@@ -11,6 +11,7 @@ from ..policy.models import TenantPolicy, TenantState
 from ..policy.store import InMemoryPolicyStore
 from ..routing.circuit_breaker import CircuitBreaker
 from ..routing.router import CertifiedRouter
+from ..usage.store import InMemoryUsageStore, current_month
 from .fakes import FakeConverseClient
 
 
@@ -42,6 +43,17 @@ def _router(fake: FakeConverseClient) -> CertifiedRouter:
     )
 
 
+def _process(message_body, *, job_store, policy_cache, guardrail_client, router, usage_store=None):
+    process_one(
+        message_body,
+        job_store=job_store,
+        policy_cache=policy_cache,
+        guardrail_client=guardrail_client,
+        router=router,
+        usage_store=usage_store if usage_store is not None else InMemoryUsageStore(),
+    )
+
+
 class ProcessOneTests(unittest.TestCase):
     def test_success_marks_job_succeeded_with_output(self):
         job_store = InMemoryJobStore()
@@ -49,7 +61,7 @@ class ProcessOneTests(unittest.TestCase):
         job_store.put(job)
         fake = FakeConverseClient(response_text="hi there", input_tokens=5, output_tokens=3)
 
-        process_one(
+        _process(
             f'{{"job_id": "{job.job_id}"}}',
             job_store=job_store,
             policy_cache=_policy_cache(finance=TenantPolicy(tenant_id="finance")),
@@ -63,13 +75,31 @@ class ProcessOneTests(unittest.TestCase):
         self.assertEqual(updated.usage_input_tokens, 5)
         self.assertEqual(updated.usage_output_tokens, 3)
 
+    def test_success_records_spend_in_usage_store(self):
+        job_store = InMemoryJobStore()
+        job = _job()
+        job_store.put(job)
+        fake = FakeConverseClient(response_text="hi there", input_tokens=1000, output_tokens=1000)
+        usage_store = InMemoryUsageStore()
+
+        _process(
+            f'{{"job_id": "{job.job_id}"}}',
+            job_store=job_store,
+            policy_cache=_policy_cache(finance=TenantPolicy(tenant_id="finance")),
+            guardrail_client=BasicGuardrailClient(),
+            router=_router(fake),
+            usage_store=usage_store,
+        )
+
+        self.assertGreater(usage_store.get("finance", current_month()), 0.0)
+
     def test_suspended_tenant_fails_closed_without_calling_bedrock(self):
         job_store = InMemoryJobStore()
         job = _job()
         job_store.put(job)
         fake = FakeConverseClient()
 
-        process_one(
+        _process(
             f'{{"job_id": "{job.job_id}"}}',
             job_store=job_store,
             policy_cache=_policy_cache(
@@ -92,7 +122,7 @@ class ProcessOneTests(unittest.TestCase):
             error=BedrockInvocationError("boom", code="ThrottlingException", retryable=True)
         )
 
-        process_one(
+        _process(
             f'{{"job_id": "{job.job_id}"}}',
             job_store=job_store,
             policy_cache=_policy_cache(finance=TenantPolicy(tenant_id="finance")),
@@ -110,7 +140,7 @@ class ProcessOneTests(unittest.TestCase):
         job_store.put(job)
         fake = FakeConverseClient()
 
-        process_one(
+        _process(
             f'{{"job_id": "{job.job_id}"}}',
             job_store=job_store,
             policy_cache=_policy_cache(finance=TenantPolicy(tenant_id="finance")),

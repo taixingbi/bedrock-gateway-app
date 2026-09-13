@@ -24,6 +24,7 @@ from ..policy.cache import PolicySnapshotCache
 from ..policy.models import TenantState, UnknownTenantError
 from ..policy.store import MutablePolicyStore
 from ..telemetry.logging import get_logger, log_event
+from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
 
 _logger = get_logger("gateway.admin")
@@ -36,6 +37,7 @@ def build_admin_router(
     settings: Settings,
     token_verifier: TokenVerifier,
     iam_tenant_resolver: IamTenantResolver,
+    usage_store: UsageStore,
 ) -> List[Route]:
     async def set_tenant_state(request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
@@ -86,4 +88,48 @@ def build_admin_router(
             {"tenant_id": tenant_id, "state": updated.state.value, "policy_epoch": updated.policy_epoch}
         )
 
-    return [Route("/v1/admin/tenants/{tenant_id}/state", set_tenant_state, methods=["PUT"])]
+    async def get_usage(request: Request) -> JSONResponse:
+        """M8 FinOps showback/chargeback (plan section 20): every known
+        tenant's current-month spend against its monthly_budget (None ==
+        unlimited, reported as null utilization rather than a divide by
+        zero)."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = pipeline.authenticate(
+                request.headers.get("authorization"),
+                token_verifier=token_verifier,
+                iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
+                iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
+                iam_tenant_resolver=iam_tenant_resolver,
+            )
+            pipeline.authorize(identity, required_role=settings.admin_required_role)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        month = current_month()
+        tenants = []
+        for tenant_id in policy_store.list_tenant_ids():
+            policy = policy_cache.get(tenant_id)
+            spend = usage_store.get(tenant_id, month)
+            utilization = (
+                round(spend / policy.monthly_budget, 4)
+                if policy.monthly_budget and policy.monthly_budget > 0
+                else None
+            )
+            tenants.append(
+                {
+                    "tenant_id": tenant_id,
+                    "month": month,
+                    "spend": round(spend, 6),
+                    "monthly_budget": policy.monthly_budget,
+                    "utilization": utilization,
+                }
+            )
+
+        return JSONResponse({"tenants": tenants})
+
+    return [
+        Route("/v1/admin/tenants/{tenant_id}/state", set_tenant_state, methods=["PUT"]),
+        Route("/v1/admin/usage", get_usage, methods=["GET"]),
+    ]

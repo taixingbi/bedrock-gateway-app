@@ -50,6 +50,10 @@ class TenantPolicy:
     # M5: opt-in only -- see telemetry/debug_capture.py. False by default
     # means raw prompt/response content is never captured anywhere.
     debug_capture_enabled: bool = False
+    # M8: hard limit on estimated spend per calendar month (see
+    # usage/store.py). None means unlimited -- most tenants don't need
+    # one for a V1 MVP; budget enforcement is opt-in per tenant.
+    monthly_budget: Optional[float] = None
 
 
 class UnknownTenantError(Exception):

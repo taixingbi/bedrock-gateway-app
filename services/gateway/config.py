@@ -76,6 +76,10 @@ class Settings:
     jobs_queue_url: str
     jobs_table_name: str
 
+    # M8 FinOps -- empty means in-memory UsageStore instead of the real
+    # DynamoDB-backed one, same fallback pattern as jobs_table_name.
+    usage_table_name: str
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -116,4 +120,5 @@ def load_settings() -> Settings:
         debug_capture_ttl_s=_env_float("DEBUG_CAPTURE_TTL_S", 900.0),
         jobs_queue_url=os.environ.get("JOBS_QUEUE_URL", ""),
         jobs_table_name=os.environ.get("JOBS_TABLE_NAME", ""),
+        usage_table_name=os.environ.get("USAGE_TABLE_NAME", ""),
     )

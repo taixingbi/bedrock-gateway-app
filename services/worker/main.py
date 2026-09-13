@@ -27,6 +27,7 @@ from ..gateway.policy.store import FilePolicyStore
 from ..gateway.routing.circuit_breaker import CircuitBreaker
 from ..gateway.routing.router import CertifiedRouter, load_route_sets_from_yaml
 from ..gateway.telemetry.logging import configure_logging, get_logger, log_event
+from ..gateway.usage.store import DynamoDbUsageStore, InMemoryUsageStore
 
 _logger = get_logger("gateway.worker.main")
 
@@ -86,6 +87,11 @@ def main() -> None:
         circuit_breaker=circuit_breaker,
         route_sets=load_route_sets_from_yaml(settings.route_set_config_path),
     )
+    usage_store = (
+        DynamoDbUsageStore(table_name=settings.usage_table_name, region=settings.aws_region)
+        if settings.usage_table_name
+        else InMemoryUsageStore()
+    )
     sqs_client = boto3.client("sqs", region_name=settings.aws_region)
 
     log_event(_logger, "INFO", "worker started", queue_url=settings.jobs_queue_url)
@@ -96,6 +102,7 @@ def main() -> None:
         policy_cache=policy_cache,
         guardrail_client=guardrail_client,
         router=router,
+        usage_store=usage_store,
     )
 
 

@@ -31,6 +31,7 @@ from ..jobs.store import JobStore
 from ..policy.cache import PolicySnapshotCache
 from ..policy.rate_limiter import TokenBucketRateLimiter
 from ..telemetry.logging import get_logger, log_event
+from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
 from .schemas import JobRequest, JobResponse, JobStatusResponse, Usage
 
@@ -47,6 +48,7 @@ def build_jobs_router(
     guardrail_client: GuardrailClient,
     job_store: JobStore,
     job_queue: JobQueue,
+    usage_store: UsageStore,
 ) -> list[Route]:
     def _authenticate(request: Request):
         return pipeline.authenticate(
@@ -66,6 +68,7 @@ def build_jobs_router(
             policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)
             pipeline.enforce_kill_switch(policy)
             pipeline.enforce_rate_limit(policy, rate_limiter=rate_limiter)
+            pipeline.enforce_budget(policy, usage_store=usage_store, month=current_month())
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 

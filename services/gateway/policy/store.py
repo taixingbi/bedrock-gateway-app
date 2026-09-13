@@ -17,7 +17,7 @@ the same "push + bounded TTL" contract without needing SNS/SQS.
 from __future__ import annotations
 
 import dataclasses
-from typing import Dict, Protocol
+from typing import Dict, List, Protocol
 
 from .models import TenantPolicy, TenantSlo, TenantState, UnknownTenantError
 
@@ -25,6 +25,11 @@ from .models import TenantPolicy, TenantSlo, TenantState, UnknownTenantError
 class PolicyStore(Protocol):
     def get(self, tenant_id: str) -> TenantPolicy:
         """Raises UnknownTenantError if tenant_id has no policy."""
+        ...
+
+    def list_tenant_ids(self) -> List[str]:
+        """M8: every known tenant_id, for the admin usage/showback report
+        (api/admin_routes.py) to enumerate. Order is not guaranteed."""
         ...
 
 
@@ -48,6 +53,9 @@ class InMemoryPolicyStore:
             return self._policies[tenant_id]
         except KeyError:
             raise UnknownTenantError(tenant_id) from None
+
+    def list_tenant_ids(self) -> List[str]:
+        return list(self._policies.keys())
 
     def set_state(self, tenant_id: str, state: TenantState) -> TenantPolicy:
         current = self.get(tenant_id)
@@ -77,6 +85,9 @@ def load_policies_from_yaml(path: str) -> InMemoryPolicyStore:
             policy_epoch=int(cfg.get("policy_epoch", 1)),
             allow_guardrail_bypass_on_error=bool(cfg.get("allow_guardrail_bypass_on_error", False)),
             debug_capture_enabled=bool(cfg.get("debug_capture_enabled", False)),
+            monthly_budget=(
+                float(cfg["monthly_budget"]) if cfg.get("monthly_budget") is not None else None
+            ),
         )
     return InMemoryPolicyStore(policies)
 
@@ -90,6 +101,9 @@ class FilePolicyStore:
 
     def get(self, tenant_id: str) -> TenantPolicy:
         return self._backing.get(tenant_id)
+
+    def list_tenant_ids(self) -> List[str]:
+        return self._backing.list_tenant_ids()
 
     def set_state(self, tenant_id: str, state: TenantState) -> TenantPolicy:
         return self._backing.set_state(tenant_id, state)
