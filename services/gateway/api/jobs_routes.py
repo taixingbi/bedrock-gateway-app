@@ -15,10 +15,8 @@ import time
 import uuid
 from typing import Set
 
-from pydantic import ValidationError
-from starlette.requests import Request
+from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
 from .. import pipeline
 from ..auth import aws_iam
@@ -51,7 +49,9 @@ def build_jobs_router(
     job_queue: JobQueue,
     usage_store: UsageStore,
     certified_model_ids: Set[str],
-) -> list[Route]:
+) -> APIRouter:
+    api_router = APIRouter()
+
     def _authenticate(request: Request):
         return pipeline.authenticate(
             request.headers.get("authorization"),
@@ -61,7 +61,8 @@ def build_jobs_router(
             iam_tenant_resolver=iam_tenant_resolver,
         )
 
-    async def submit_job(request: Request) -> JSONResponse:
+    @api_router.post("/v1/jobs", status_code=202, response_model=JobResponse)
+    async def submit_job(request: Request, job_request: JobRequest) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
@@ -73,16 +74,6 @@ def build_jobs_router(
             pipeline.enforce_budget(policy, usage_store=usage_store, month=current_month())
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
-
-        try:
-            body = await request.json()
-        except Exception:
-            return _error(400, "INVALID_JSON", "request body must be valid JSON", request_id)
-
-        try:
-            job_request = JobRequest.model_validate(body)
-        except ValidationError as exc:
-            return _error(400, "INVALID_REQUEST", exc.errors()[0]["msg"], request_id)
 
         try:
             model_id = pipeline.enforce_model_allowlist(
@@ -128,7 +119,8 @@ def build_jobs_router(
             JobResponse(job_id=job_id, status=JobStatus.QUEUED.value).model_dump(), status_code=202
         )
 
-    async def get_job(request: Request) -> JSONResponse:
+    @api_router.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
+    async def get_job(job_id: str, request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
@@ -137,7 +129,6 @@ def build_jobs_router(
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
-        job_id = request.path_params["job_id"]
         try:
             job = job_store.get(job_id)
         except JobNotFoundError:
@@ -164,7 +155,4 @@ def build_jobs_router(
             ).model_dump()
         )
 
-    return [
-        Route("/v1/jobs", submit_job, methods=["POST"]),
-        Route("/v1/jobs/{job_id}", get_job, methods=["GET"]),
-    ]
+    return api_router

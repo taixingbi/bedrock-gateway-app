@@ -11,11 +11,11 @@ from __future__ import annotations
 import uuid
 from typing import Dict, Optional, Set
 
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from opentelemetry import trace
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
+from starlette.responses import JSONResponse
 
 from .api.admin_routes import build_admin_router
 from .api.jobs_routes import build_jobs_router
@@ -78,7 +78,7 @@ def create_app(
     job_queue: Optional[JobQueue] = None,
     usage_store: Optional[UsageStore] = None,
     certified_model_ids: Optional[Set[str]] = None,
-) -> Starlette:
+) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
 
@@ -145,7 +145,7 @@ def create_app(
             else InMemoryUsageStore()
         )
 
-    routes = build_router(
+    router_ = build_router(
         router=router,
         settings=settings,
         token_verifier=token_verifier,
@@ -159,7 +159,7 @@ def create_app(
         debug_capture_store=debug_capture_store,
         usage_store=usage_store,
     )
-    admin_routes = build_admin_router(
+    admin_router = build_admin_router(
         policy_store=policy_store,
         policy_cache=policy_cache,
         settings=settings,
@@ -169,7 +169,7 @@ def create_app(
         route_sets=route_sets,
         certified_model_ids=certified_model_ids,
     )
-    jobs_routes = build_jobs_router(
+    jobs_router = build_jobs_router(
         settings=settings,
         token_verifier=token_verifier,
         iam_tenant_resolver=iam_tenant_resolver,
@@ -181,7 +181,6 @@ def create_app(
         usage_store=usage_store,
         certified_model_ids=certified_model_ids,
     )
-    routes = routes + admin_routes + jobs_routes
 
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
@@ -194,11 +193,36 @@ def create_app(
             status_code=500,
         )
 
-    app = Starlette(
-        routes=routes,
+    async def invalid_request_body(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """Reformats FastAPI's default 422 validation-error shape into
+        this gateway's existing ErrorResponse contract (400, a single
+        code+message, request_id) -- every route handler used to do
+        this by hand around a manual `await request.json()` +
+        `Model.model_validate(body)`; this is the one place that logic
+        lives now that request bodies are FastAPI-injected parameters.
+        Malformed JSON syntax and a schema violation both raise this
+        same exception, distinguished only by error type ("json_invalid"
+        for the former), which is what INVALID_JSON vs INVALID_REQUEST
+        below is keyed on."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+        first_error = exc.errors()[0]
+        code = "INVALID_JSON" if first_error.get("type") == "json_invalid" else "INVALID_REQUEST"
+        return JSONResponse(
+            {"error": {"code": code, "message": first_error.get("msg", "invalid request"), "request_id": request_id}},
+            status_code=400,
+        )
+
+    app = FastAPI(
+        title="Bedrock Gateway",
         middleware=[Middleware(RequestContextMiddleware)],
-        exception_handlers={Exception: unhandled_error},
+        exception_handlers={
+            Exception: unhandled_error,
+            RequestValidationError: invalid_request_body,
+        },
     )
+    app.include_router(router_)
+    app.include_router(admin_router)
+    app.include_router(jobs_router)
     app.state.settings = settings
     return app
 

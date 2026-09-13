@@ -98,3 +98,11 @@ class JobStatusResponse(BaseModel):
     usage: Optional[Usage] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+
+
+class SetTenantStateBody(BaseModel):
+    # Left as a permissive str (not the TenantState enum) deliberately:
+    # admin_routes.py validates it manually against TenantState itself,
+    # to keep its existing custom "'state' must be one of [...]" error
+    # message and code rather than FastAPI's own enum-validation shape.
+    state: str

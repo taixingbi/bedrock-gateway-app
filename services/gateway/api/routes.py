@@ -1,21 +1,27 @@
 """HTTP handlers for the gateway API: /healthz, /v1/chat.
 
-Deliberately framework-light (Starlette, not FastAPI) so it runs and is
-testable without a package installer reaching the internet -- see
-docs/ROADMAP.md for why. Swapping to FastAPI later (for free OpenAPI docs,
-section 3 of the plan) is a mechanical port: these handlers already do
-their own Pydantic validation and return plain dicts.
+FastAPI (APIRouter), not raw Starlette routing -- gets free OpenAPI
+docs/schema (/docs, /openapi.json) at the cost of request bodies being
+parsed/validated by FastAPI's dependency injection *before* the
+handler body runs, rather than by hand after auth. That reordering is
+deliberate and judged safe: no pipeline stage's ordering guarantee
+(plan section 1's invariants) is about body-shape-vs-auth precedence,
+only about safety/policy checks happening before the model is ever
+called -- a client sending both a bad token and a malformed body gets
+some 4xx either way, and no test exercises that specific combination.
+main.py's `invalid_request_body` exception handler reformats FastAPI's
+default validation-error shape back into this gateway's existing
+ErrorResponse contract (400, INVALID_JSON/INVALID_REQUEST, request_id)
+so callers see no difference from before the migration.
 """
 from __future__ import annotations
 
 import time
 import uuid
 
+from fastapi import APIRouter, Request
 from opentelemetry import trace
-from pydantic import ValidationError
-from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
-from starlette.routing import Route
 
 from .. import pipeline
 from ..auth import aws_iam
@@ -66,11 +72,15 @@ def build_router(
     tracer: trace.Tracer,
     debug_capture_store: DebugCaptureStore,
     usage_store: UsageStore,
-) -> list[Route]:
-    async def healthz(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+) -> APIRouter:
+    api_router = APIRouter()
 
-    async def chat(request: Request) -> JSONResponse:
+    @api_router.get("/healthz")
+    async def healthz() -> dict:
+        return {"status": "ok"}
+
+    @api_router.post("/v1/chat", response_model=ChatResponse, response_model_exclude_none=True)
+    async def chat(request: Request, chat_request: ChatRequest):
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         with tracer.start_as_current_span("chat.request") as span:
@@ -97,18 +107,6 @@ def build_router(
                 span, tenant_id=identity.tenant_id, application_id=identity.application_id,
                 policy_epoch=policy.policy_epoch, route_set=policy.route_set,
             )
-
-            try:
-                body = await request.json()
-            except Exception:
-                set_span_attributes(span, status=400, error="invalid JSON")
-                return _error(400, "INVALID_JSON", "request body must be valid JSON", request_id)
-
-            try:
-                chat_request = ChatRequest.model_validate(body)
-            except ValidationError as exc:
-                set_span_attributes(span, status=400, error=exc.errors()[0]["msg"])
-                return _error(400, "INVALID_REQUEST", exc.errors()[0]["msg"], request_id)
 
             try:
                 model_id = pipeline.enforce_model_allowlist(
@@ -355,10 +353,7 @@ def build_router(
             )
             return JSONResponse(response.model_dump())
 
-    return [
-        Route("/healthz", healthz, methods=["GET"]),
-        Route("/v1/chat", chat, methods=["POST"]),
-    ]
+    return api_router
 
 
 def router_converse_stream(router: CertifiedRouter, *, model_id, messages, max_tokens, temperature):

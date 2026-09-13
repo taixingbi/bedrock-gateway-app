@@ -9,11 +9,10 @@ updates in later milestones) without touching the chat pipeline.
 from __future__ import annotations
 
 import uuid
-from typing import Dict, List, Set
+from typing import Dict, Set
 
-from starlette.requests import Request
+from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
 from .. import pipeline
 from ..auth import aws_iam
@@ -27,6 +26,7 @@ from ..routing.router import RouteSet
 from ..telemetry.logging import get_logger, log_event
 from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
+from .schemas import SetTenantStateBody
 
 _logger = get_logger("gateway.admin")
 
@@ -41,7 +41,9 @@ def build_admin_router(
     usage_store: UsageStore,
     route_sets: Dict[str, RouteSet],
     certified_model_ids: Set[str],
-) -> List[Route]:
+) -> APIRouter:
+    api_router = APIRouter()
+
     def _authenticate_admin(request: Request):
         """Shared by every /v1/admin/* handler -- raises pipeline.PipelineError,
         which each caller turns into the right error response itself
@@ -57,7 +59,8 @@ def build_admin_router(
         pipeline.authorize(identity, required_role=settings.admin_required_role)
         return identity
 
-    async def set_tenant_state(request: Request) -> JSONResponse:
+    @api_router.put("/v1/admin/tenants/{tenant_id}/state")
+    async def set_tenant_state(tenant_id: str, body: SetTenantStateBody, request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
@@ -65,16 +68,8 @@ def build_admin_router(
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
-        tenant_id = request.path_params["tenant_id"]
-
         try:
-            body = await request.json()
-        except Exception:
-            return _error(400, "INVALID_JSON", "request body must be valid JSON", request_id)
-
-        raw_state = body.get("state") if isinstance(body, dict) else None
-        try:
-            new_state = TenantState(raw_state)
+            new_state = TenantState(body.state)
         except ValueError:
             valid = [s.value for s in TenantState]
             return _error(400, "INVALID_REQUEST", f"'state' must be one of {valid}", request_id)
@@ -99,6 +94,7 @@ def build_admin_router(
             {"tenant_id": tenant_id, "state": updated.state.value, "policy_epoch": updated.policy_epoch}
         )
 
+    @api_router.get("/v1/admin/usage")
     async def get_usage(request: Request) -> JSONResponse:
         """M8 FinOps showback/chargeback (plan section 20): every known
         tenant's current-month spend against its monthly_budget (None ==
@@ -133,6 +129,7 @@ def build_admin_router(
 
         return JSONResponse({"tenants": tenants})
 
+    @api_router.get("/v1/admin/tenants")
     async def list_tenants(request: Request) -> JSONResponse:
         """M10 portal: full tenant policy listing (state, models,
         quota, budget, guardrail_policy, route_set) -- get_usage above
@@ -162,6 +159,7 @@ def build_admin_router(
 
         return JSONResponse({"tenants": tenants})
 
+    @api_router.get("/v1/admin/route-sets")
     async def list_route_sets(request: Request) -> JSONResponse:
         """M10 portal: route_sets.yaml plus each model's certification
         status (M9) -- CertifiedRouter silently drops an uncertified
@@ -190,6 +188,7 @@ def build_admin_router(
 
         return JSONResponse({"route_sets": sets, "certified_models": sorted(certified_model_ids)})
 
+    @api_router.get("/v1/admin/applications")
     async def list_applications(request: Request) -> JSONResponse:
         """M10 portal: application grants configured on the AWS_IAM/
         SigV4 auth path (auth/aws_iam.py's IamTenantResolver). The JWT
@@ -219,10 +218,4 @@ def build_admin_router(
             "note": "AWS_IAM/SigV4 auth path only -- the JWT path has no application registry to list",
         })
 
-    return [
-        Route("/v1/admin/tenants/{tenant_id}/state", set_tenant_state, methods=["PUT"]),
-        Route("/v1/admin/tenants", list_tenants, methods=["GET"]),
-        Route("/v1/admin/usage", get_usage, methods=["GET"]),
-        Route("/v1/admin/route-sets", list_route_sets, methods=["GET"]),
-        Route("/v1/admin/applications", list_applications, methods=["GET"]),
-    ]
+    return api_router

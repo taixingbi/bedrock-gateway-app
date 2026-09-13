@@ -1,18 +1,25 @@
 # Design notes / deviations from the plan (M0)
 
-**Starlette instead of FastAPI, for now.** The plan's section 3 implies
-FastAPI (OpenAPI docs, familiar DI). M0 is built directly on Starlette with
-manual Pydantic validation in the handlers instead. Functionally
-equivalent for M0's scope (one POST endpoint); the only thing given up is
-auto-generated OpenAPI docs, which don't matter until the API surface in
-section 3 grows (`/v1/embeddings`, `/v1/batch`, `/v1/jobs/{id}`,
-`/v1/models`, the admin API). Porting to FastAPI later is mechanical: the
-route handlers already take a validated Pydantic model and return a dict;
-wrap them with `@router.post(...)` and drop the manual
-`ChatRequest.model_validate(...)` call. Do this port at the same time the
-admin API is added (M2/M10) rather than before, since FastAPI's DI system
-is worth adopting properly once there's more than one dependency
-(converse_client) to inject.
+**Starlette instead of FastAPI, for now — RESOLVED, ported to FastAPI
+after M10.** M0 was built directly on Starlette with manual Pydantic
+validation in the handlers, exactly as this note originally described;
+by the time the port happened (after M10, once the admin API and jobs
+API had grown well past one endpoint) every route module had a
+`build_X_router()` returning a plain list of `Route` objects. The port
+was close to mechanical as predicted: each returns a `fastapi.APIRouter`
+now, handlers gained `@router.get/post/put(...)` decorators, and
+request bodies that used to be manually parsed
+(`await request.json()` + `Model.model_validate(...)`) are now
+FastAPI-injected parameters instead. The one real design decision was
+ordering: FastAPI resolves/validates injected body parameters *before*
+the handler body runs, which is *after* where the manual auth check
+used to sit -- judged safe since no pipeline invariant depends on
+body-shape-vs-auth precedence, only on safety/policy checks running
+before the model is ever called. `main.py`'s `invalid_request_body`
+exception handler reformats FastAPI's default validation-error shape
+back into the gateway's existing `ErrorResponse` contract so external
+behavior (status codes, error codes) is unchanged. `/docs` and
+`/openapi.json` now work for real.
 
 **No circuit breaker / fallback yet.** `inference/bedrock_client.py`
 retries a single Bedrock call with bounded attempts + jitter, but there is
