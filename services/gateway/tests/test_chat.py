@@ -40,9 +40,21 @@ class ChatEndpointTests(unittest.TestCase):
 
     def test_model_override_is_passed_through(self):
         # sandbox has an empty model allowlist (no restriction) -- see
-        # policies/tenants.yaml -- so any model override is accepted.
+        # policies/tenants.yaml -- so any *allowlisted* model override
+        # is accepted; it still has to be certified (M9), hence the
+        # explicit certified_model_ids override here rather than using
+        # the shared _client() helper (which loads the real, small
+        # policies/certified_models.yaml).
         fake = FakeConverseClient()
-        client = _client(fake)
+        settings = load_settings()
+        fixture = get_auth_fixture()
+        app = create_app(
+            settings=settings,
+            converse_client=fake,
+            token_verifier=fixture.verifier,
+            certified_model_ids={"anthropic.claude-3-haiku"},
+        )
+        client = TestClient(app)
 
         client.post(
             "/v1/chat",

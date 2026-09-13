@@ -21,7 +21,7 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
-for f in tenants.yaml route_sets.yaml iam_tenants.yaml; do
+for f in tenants.yaml route_sets.yaml iam_tenants.yaml certified_models.yaml; do
   banner=$(sed -n '/^# ====/,/^# ====/p' "$DST/$f")
   { printf '%s\n' "$banner"; cat "$SRC/$f"; } > "$DST/$f.tmp"
   mv "$DST/$f.tmp" "$DST/$f"

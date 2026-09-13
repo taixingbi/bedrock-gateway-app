@@ -1,0 +1,27 @@
+# Golden dataset for evals/run_eval.py (M9, plan section 21).
+#
+# Deliberately small and deterministic -- factual, single-answer
+# prompts with an unambiguous expected keyword, so quality scoring can
+# be a plain case-insensitive substring match rather than needing an
+# LLM-judge (a real deployment would likely add one; this proves the
+# eval-gate mechanism exists and is wired to real enforcement, not that
+# the scoring method is state of the art).
+
+cases:
+  - prompt: "What is the capital of France? Answer in one word."
+    expect_keyword: "Paris"
+
+  - prompt: "What is 12 + 30? Answer with just the number."
+    expect_keyword: "42"
+
+  - prompt: "Name the largest planet in our solar system. One word."
+    expect_keyword: "Jupiter"
+
+  - prompt: "What color do you get when you mix blue and yellow paint? One word."
+    expect_keyword: "green"
+
+  - prompt: "What is the chemical symbol for water? Reply with plain ASCII only, like H2O -- no subscript characters."
+    expect_keyword: "H2O"
+
+  - prompt: "Who wrote Romeo and Juliet? Just the name."
+    expect_keyword: "Shakespeare"

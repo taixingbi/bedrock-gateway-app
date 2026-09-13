@@ -13,7 +13,7 @@ machinery.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Set
 
 from .auth import rbac
 from .auth.aws_iam import IamTenantResolver
@@ -190,6 +190,22 @@ def enforce_model_allowlist(
     if policy.models:
         return policy.models[0]
     return default_model
+
+
+def enforce_model_certification(model_id: str, *, certified_model_ids: Set[str]) -> None:
+    """Stage 4c: Routing Invariant (M9, plan sections 1 and 13). A model
+    that hasn't passed evaluation/certification (evals/run_eval.py,
+    policies/certified_models.yaml) must never receive production
+    traffic -- checked here for the primary before the router is ever
+    called; routing/router.py's CertifiedRouter separately filters
+    fallback candidates against the same registry, so a certified
+    primary can't fall back to an uncertified model either."""
+    if model_id not in certified_model_ids:
+        raise PipelineError(
+            403,
+            "MODEL_NOT_CERTIFIED",
+            f"model '{model_id}' has not passed certification (see evals/run_eval.py)",
+        )
 
 
 def check_input_guardrail(

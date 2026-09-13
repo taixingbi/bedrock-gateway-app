@@ -114,6 +114,7 @@ def build_router(
                 model_id = pipeline.enforce_model_allowlist(
                     policy, requested_model=chat_request.model, default_model=settings.bedrock_model_id
                 )
+                pipeline.enforce_model_certification(model_id, certified_model_ids=router.certified_model_ids)
             except pipeline.PipelineError as exc:
                 set_span_attributes(span, status=exc.status_code, error=str(exc))
                 return _error(exc.status_code, exc.code, str(exc), request_id)

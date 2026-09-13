@@ -12,9 +12,11 @@
 # might request. Referenced by tenant policy's `route_set` field (see
 # policies/tenants.yaml).
 #
-# "Certified" here just means "listed in this file" -- a real deployment
-# would gate entries behind the evaluation/certification pipeline in plan
-# section 21 (M9) before they're allowed here.
+# Being listed here is necessary but not sufficient: every primary/
+# fallback model must also be in certified_models.yaml (M9, plan
+# section 21) -- validate.py checks that at commit time,
+# routing/router.py's CertifiedRouter enforces it at runtime by
+# filtering any model not certified out of the candidate list.
 #
 # Only Nova Micro is confirmed accessible on this account (646821141010,
 # us-east-1) right now, so there are no fallbacks configured yet -- a

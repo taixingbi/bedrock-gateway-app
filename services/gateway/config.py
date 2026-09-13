@@ -58,6 +58,9 @@ class Settings:
     tenant_policy_path: str
     policy_cache_ttl_s: float
 
+    # M9 model lifecycle -- see routing/certification.py
+    certified_models_path: str
+
     # M4 gateway reliability
     route_set_config_path: str
     response_cache_ttl_s: float
@@ -111,6 +114,7 @@ def load_settings() -> Settings:
         iam_tenants_path=os.environ.get("IAM_TENANTS_PATH", "policies/iam_tenants.yaml"),
         tenant_policy_path=os.environ.get("TENANT_POLICY_PATH", "policies/tenants.yaml"),
         policy_cache_ttl_s=_env_float("POLICY_CACHE_TTL_S", 30.0),
+        certified_models_path=os.environ.get("CERTIFIED_MODELS_PATH", "policies/certified_models.yaml"),
         route_set_config_path=os.environ.get("ROUTE_SET_CONFIG_PATH", "policies/route_sets.yaml"),
         response_cache_ttl_s=_env_float("RESPONSE_CACHE_TTL_S", 60.0),
         response_cache_max_entries=_env_int("RESPONSE_CACHE_MAX_ENTRIES", 1000),

@@ -1,0 +1,38 @@
+# ============================================================
+# COPY -- not the source of truth. Canonical copy lives in
+# github.com/taixingbi/bedrock-gateway-policies (environments/dev/).
+# Sync by running scripts/sync-policies.sh against a checkout of
+# that repo. This copy exists only so `docker build` here keeps
+# working during the app/infra/policies repo split -- once the
+# gateway has a working S3/DynamoDB-backed PolicyStore, this
+# directory and the COPY step in Dockerfile go away entirely.
+# ============================================================
+# Model certification registry (M9, plan section 21). Written by
+# bedrock-gateway-app's evals/run_eval.py, never by hand -- a model
+# only appears here after actually clearing the release gate
+# (quality>=0.88, safety>=0.99, p95 latency<3000ms, cost/request<$0.02)
+# against evals/golden_dataset.yaml, run live against real Bedrock.
+#
+# routing/certification.py loads this; routing/router.py's
+# CertifiedRouter refuses to route to (primary or fallback) any model
+# not listed here, and pipeline.enforce_model_certification rejects an
+# uncertified primary with 403 MODEL_NOT_CERTIFIED before the router
+# is ever reached -- this is what actually enforces the Routing
+# Invariant (plan section 1: "production traffic may only be routed to
+# models that have passed the required evaluation and certification
+# gates"), which route_sets.yaml alone never did.
+#
+# To certify a new model:
+#   python -m evals.run_eval --model <model-id> \
+#     --certified-models-path <this file>
+# Rollback: revert the commit that added/changed an entry here and
+# re-promote -- no separate rollback mechanism, this is just policy
+# data like tenants.yaml/route_sets.yaml.
+
+certified_models:
+  us.amazon.nova-micro-v1:0:
+    quality_score: 1.0
+    safety_score: 1.0
+    p95_latency_ms: 388.64
+    cost_per_request: 1.17e-06
+    certified_at: '2026-09-13'

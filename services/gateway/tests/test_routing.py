@@ -85,7 +85,10 @@ class CircuitBreakerTests(unittest.TestCase):
 class CertifiedRouterTests(unittest.TestCase):
     def test_single_candidate_success_no_fallback(self):
         fake = FakeConverseClient(response_text="ok")
-        router = CertifiedRouter(converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets={})
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets={},
+            certified_model_ids={"model-a"},
+        )
 
         routed = router.converse(
             primary_model_id="model-a", route_set_name=None, messages=[], max_tokens=100, temperature=0.5
@@ -98,7 +101,10 @@ class CertifiedRouterTests(unittest.TestCase):
     def test_falls_back_to_certified_fallback_on_primary_failure(self):
         fake = FailNTimesThenSucceed(fail_models={"model-a"})
         route_sets = {"rs1": RouteSet(name="rs1", primary="model-a", fallbacks=["model-b"])}
-        router = CertifiedRouter(converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets=route_sets)
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets=route_sets,
+            certified_model_ids={"model-a", "model-b"},
+        )
 
         routed = router.converse(
             primary_model_id="model-a", route_set_name="rs1", messages=[], max_tokens=100, temperature=0.5
@@ -107,26 +113,59 @@ class CertifiedRouterTests(unittest.TestCase):
         self.assertEqual(routed.model_id, "model-b")
         self.assertTrue(routed.fallback)
 
-    def test_fallback_only_from_certified_route_set_never_arbitrary(self):
-        """A model not listed in the route set's fallbacks is never tried,
-        even if the primary fails -- fallback cannot bypass certification
-        (plan section 13's core invariant)."""
+    def test_uncertified_fallback_is_never_tried(self):
+        """A fallback listed in route_sets.yaml but not in
+        certified_models.yaml is never tried, even if the primary fails
+        -- fallback traffic cannot bypass certification (M9, plan
+        section 13's core invariant, and plan section 1's Routing
+        Invariant). Before M9, this was only a documentation promise --
+        route_sets.yaml's own docstring admitted "'certified' here just
+        means 'listed in this file'"."""
         fake = FailNTimesThenSucceed(fail_models={"model-a"})
-        route_sets = {"rs1": RouteSet(name="rs1", primary="model-a", fallbacks=["model-b"])}
-        router = CertifiedRouter(converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets=route_sets)
+        route_sets = {
+            "rs1": RouteSet(name="rs1", primary="model-a", fallbacks=["model-uncertified", "model-b"])
+        }
+        # model-uncertified is deliberately absent here despite being
+        # listed as a fallback above.
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets=route_sets,
+            certified_model_ids={"model-a", "model-b"},
+        )
 
-        router.converse(
+        routed = router.converse(
             primary_model_id="model-a", route_set_name="rs1", messages=[], max_tokens=100, temperature=0.5
         )
 
         called_models = {c["model_id"] for c in fake.calls}
-        self.assertEqual(called_models, {"model-a", "model-b"})
         self.assertNotIn("model-uncertified", called_models)
+        self.assertEqual(routed.model_id, "model-b")
+
+    def test_uncertified_primary_raises_all_routes_unavailable(self):
+        """Not just fallbacks -- an uncertified primary is also refused,
+        even with no fallbacks configured at all. (The HTTP path never
+        reaches this: pipeline.enforce_model_certification rejects it
+        earlier with a clean 403. This is the router's own backstop for
+        callers that don't go through that stage, e.g. the M7 worker.)"""
+        fake = FakeConverseClient()
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets={},
+            certified_model_ids=set(),
+        )
+
+        with self.assertRaises(AllRoutesUnavailableError):
+            router.converse(
+                primary_model_id="model-uncertified", route_set_name=None,
+                messages=[], max_tokens=100, temperature=0.5,
+            )
+        self.assertEqual(len(fake.calls), 0)
 
     def test_all_candidates_fail_raises_last_error(self):
         fake = FakeConverseClient(error=_throttled_error())
         route_sets = {"rs1": RouteSet(name="rs1", primary="model-a", fallbacks=["model-b"])}
-        router = CertifiedRouter(converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets=route_sets)
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets=route_sets,
+            certified_model_ids={"model-a", "model-b"},
+        )
 
         with self.assertRaises(BedrockInvocationError):
             router.converse(
@@ -139,7 +178,10 @@ class CertifiedRouterTests(unittest.TestCase):
         breaker.record_failure("model-b")
         fake = FakeConverseClient()
         route_sets = {"rs1": RouteSet(name="rs1", primary="model-a", fallbacks=["model-b"])}
-        router = CertifiedRouter(converse_client=fake, circuit_breaker=breaker, route_sets=route_sets)
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=breaker, route_sets=route_sets,
+            certified_model_ids={"model-a", "model-b"},
+        )
 
         with self.assertRaises(AllRoutesUnavailableError):
             router.converse(
@@ -149,7 +191,10 @@ class CertifiedRouterTests(unittest.TestCase):
 
     def test_no_route_set_configured_behaves_like_direct_call(self):
         fake = FakeConverseClient()
-        router = CertifiedRouter(converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets={})
+        router = CertifiedRouter(
+            converse_client=fake, circuit_breaker=CircuitBreaker(), route_sets={},
+            certified_model_ids={"model-a"},
+        )
 
         routed = router.converse(
             primary_model_id="model-a", route_set_name="unknown-route-set", messages=[], max_tokens=1, temperature=0.1
@@ -212,6 +257,7 @@ class RoutingIntegrationTests(unittest.TestCase):
             token_verifier=fixture.verifier,
             policy_store=policy_store,
             route_sets=route_sets,
+            certified_model_ids={primary_model, fallback_model},
             response_cache=InMemoryResponseCache(),  # fresh, unshared cache
         )
         client = TestClient(app)
@@ -227,6 +273,38 @@ class RoutingIntegrationTests(unittest.TestCase):
         body = resp.json()
         self.assertTrue(body["fallback"])
         self.assertEqual(body["model"], fallback_model)
+
+    def test_uncertified_model_is_rejected_before_ever_calling_bedrock(self):
+        """M9 end to end over real HTTP: a tenant assigned to an
+        uncertified model gets a clean 403 MODEL_NOT_CERTIFIED and the
+        fake ConverseClient is never even called -- pipeline.py's stage
+        runs before router.converse() is reached."""
+        fake = FakeConverseClient()
+        policy_store = InMemoryPolicyStore(
+            {"finance": _policy(tenant_id="finance", models=["model-uncertified"])}
+        )
+        settings = load_settings()
+        fixture = get_auth_fixture()
+        app = create_app(
+            settings=settings,
+            converse_client=fake,
+            token_verifier=fixture.verifier,
+            policy_store=policy_store,
+            certified_model_ids={"some-other-model"},  # deliberately excludes model-uncertified
+            response_cache=InMemoryResponseCache(),
+        )
+        client = TestClient(app)
+        token = fixture.token(tenant_id="finance")
+
+        resp = client.post(
+            "/v1/chat",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers=auth_header(token),
+        )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["error"]["code"], "MODEL_NOT_CERTIFIED")
+        self.assertEqual(len(fake.calls), 0)
 
 
 if __name__ == "__main__":

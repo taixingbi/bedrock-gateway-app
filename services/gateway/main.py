@@ -9,7 +9,7 @@ Run under uvicorn directly (what the Dockerfile does):
 from __future__ import annotations
 
 import uuid
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from opentelemetry import trace
 from starlette.applications import Starlette
@@ -33,6 +33,8 @@ from .jobs.store import DynamoDbJobStore, InMemoryJobStore, JobStore
 from .policy.cache import PolicySnapshotCache
 from .policy.rate_limiter import TokenBucketRateLimiter
 from .policy.store import FilePolicyStore, PolicyStore
+from .routing.certification import certified_model_ids as _certified_model_ids_from
+from .routing.certification import load_certified_models_from_yaml
 from .routing.circuit_breaker import CircuitBreaker
 from .routing.router import CertifiedRouter, RouteSet, load_route_sets_from_yaml
 from .telemetry.debug_capture import DebugCaptureStore
@@ -75,6 +77,7 @@ def create_app(
     job_store: Optional[JobStore] = None,
     job_queue: Optional[JobQueue] = None,
     usage_store: Optional[UsageStore] = None,
+    certified_model_ids: Optional[Set[str]] = None,
 ) -> Starlette:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -104,11 +107,18 @@ def create_app(
         )
     if route_sets is None:
         route_sets = load_route_sets_from_yaml(settings.route_set_config_path)
+    if certified_model_ids is None:
+        certified_model_ids = _certified_model_ids_from(
+            load_certified_models_from_yaml(settings.certified_models_path)
+        )
 
     policy_cache = PolicySnapshotCache(store=policy_store, ttl_s=settings.policy_cache_ttl_s)
     rate_limiter = TokenBucketRateLimiter()
     router = CertifiedRouter(
-        converse_client=converse_client, circuit_breaker=circuit_breaker, route_sets=route_sets
+        converse_client=converse_client,
+        circuit_breaker=circuit_breaker,
+        route_sets=route_sets,
+        certified_model_ids=certified_model_ids,
     )
     if tracer is None:
         tracer = configure_tracing(
@@ -167,6 +177,7 @@ def create_app(
         job_store=job_store,
         job_queue=job_queue,
         usage_store=usage_store,
+        certified_model_ids=certified_model_ids,
     )
     routes = routes + admin_routes + jobs_routes
 

@@ -24,6 +24,7 @@ from ..gateway.jobs.processor import process_one
 from ..gateway.jobs.store import DynamoDbJobStore
 from ..gateway.policy.cache import PolicySnapshotCache
 from ..gateway.policy.store import FilePolicyStore
+from ..gateway.routing.certification import certified_model_ids, load_certified_models_from_yaml
 from ..gateway.routing.circuit_breaker import CircuitBreaker
 from ..gateway.routing.router import CertifiedRouter, load_route_sets_from_yaml
 from ..gateway.telemetry.logging import configure_logging, get_logger, log_event
@@ -86,6 +87,9 @@ def main() -> None:
         converse_client=converse_client,
         circuit_breaker=circuit_breaker,
         route_sets=load_route_sets_from_yaml(settings.route_set_config_path),
+        certified_model_ids=certified_model_ids(
+            load_certified_models_from_yaml(settings.certified_models_path)
+        ),
     )
     usage_store = (
         DynamoDbUsageStore(table_name=settings.usage_table_name, region=settings.aws_region)

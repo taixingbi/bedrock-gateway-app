@@ -35,11 +35,14 @@ def _policy_cache(**policies: TenantPolicy) -> PolicySnapshotCache:
     return PolicySnapshotCache(store=InMemoryPolicyStore(policies), ttl_s=30.0)
 
 
-def _router(fake: FakeConverseClient) -> CertifiedRouter:
+def _router(fake: FakeConverseClient, *, certified_model_ids=None) -> CertifiedRouter:
     return CertifiedRouter(
         converse_client=fake,
         circuit_breaker=CircuitBreaker(failure_threshold=5, reset_timeout_s=30.0),
         route_sets={},
+        certified_model_ids=(
+            certified_model_ids if certified_model_ids is not None else {"us.amazon.nova-micro-v1:0"}
+        ),
     )
 
 

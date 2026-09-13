@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Set
 
 from pydantic import ValidationError
 from starlette.requests import Request
@@ -49,6 +50,7 @@ def build_jobs_router(
     job_store: JobStore,
     job_queue: JobQueue,
     usage_store: UsageStore,
+    certified_model_ids: Set[str],
 ) -> list[Route]:
     def _authenticate(request: Request):
         return pipeline.authenticate(
@@ -86,6 +88,7 @@ def build_jobs_router(
             model_id = pipeline.enforce_model_allowlist(
                 policy, requested_model=job_request.model, default_model=settings.bedrock_model_id
             )
+            pipeline.enforce_model_certification(model_id, certified_model_ids=certified_model_ids)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 

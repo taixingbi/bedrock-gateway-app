@@ -12,7 +12,7 @@ behaves like a direct call, M0's original behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError, ConverseClient, ConverseResult
 from .circuit_breaker import CircuitBreaker
@@ -65,16 +65,24 @@ class CertifiedRouter:
         converse_client: ConverseClient,
         circuit_breaker: CircuitBreaker,
         route_sets: Dict[str, RouteSet],
+        certified_model_ids: Set[str],
     ):
         self.converse_client = converse_client
         self._breaker = circuit_breaker
         self._route_sets = route_sets
+        self.certified_model_ids = certified_model_ids
 
     def fallbacks_for(self, route_set_name: Optional[str]) -> List[str]:
+        """Routing Invariant (M9): an uncertified model is filtered out
+        here even if it's listed in route_sets.yaml -- being in a route
+        set is necessary but not sufficient, it must also have passed
+        evaluation (see certification.py)."""
         if route_set_name is None:
             return []
         route_set = self._route_sets.get(route_set_name)
-        return list(route_set.fallbacks) if route_set else []
+        if route_set is None:
+            return []
+        return [m for m in route_set.fallbacks if m in self.certified_model_ids]
 
     def converse(
         self,
@@ -86,12 +94,20 @@ class CertifiedRouter:
         temperature: float,
     ) -> RoutedResult:
         """Tries primary_model_id, then the route set's fallbacks in
-        order, skipping any model whose breaker is currently open.
-        Returns the first success. Raises the last BedrockInvocationError
-        if every attempted candidate failed, or AllRoutesUnavailableError
-        if every candidate was skipped (all circuit-open)."""
+        order, skipping any model whose breaker is currently open or
+        that isn't certified. Returns the first success. Raises the
+        last BedrockInvocationError if every attempted candidate
+        failed, or AllRoutesUnavailableError if every candidate was
+        skipped (all circuit-open, uncertified, or both) -- including
+        when primary_model_id itself isn't certified. Callers should
+        prefer pipeline.enforce_model_certification for that specific
+        case (a clean 403 before ever reaching here); this is the
+        backstop for any caller that doesn't go through that stage
+        (e.g. the M7 worker, which certification-checks at job
+        submission, not at process time)."""
         fallbacks = [m for m in self.fallbacks_for(route_set_name) if m != primary_model_id]
         candidates = [primary_model_id, *fallbacks]
+        candidates = [m for m in candidates if m in self.certified_model_ids]
 
         last_error: Optional[BedrockInvocationError] = None
         for index, model_id in enumerate(candidates):
