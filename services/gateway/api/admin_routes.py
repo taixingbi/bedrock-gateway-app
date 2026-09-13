@@ -9,7 +9,7 @@ updates in later milestones) without touching the chat pipeline.
 from __future__ import annotations
 
 import uuid
-from typing import List
+from typing import Dict, List, Set
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -23,6 +23,7 @@ from ..config import Settings
 from ..policy.cache import PolicySnapshotCache
 from ..policy.models import TenantState, UnknownTenantError
 from ..policy.store import MutablePolicyStore
+from ..routing.router import RouteSet
 from ..telemetry.logging import get_logger, log_event
 from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
@@ -38,19 +39,29 @@ def build_admin_router(
     token_verifier: TokenVerifier,
     iam_tenant_resolver: IamTenantResolver,
     usage_store: UsageStore,
+    route_sets: Dict[str, RouteSet],
+    certified_model_ids: Set[str],
 ) -> List[Route]:
+    def _authenticate_admin(request: Request):
+        """Shared by every /v1/admin/* handler -- raises pipeline.PipelineError,
+        which each caller turns into the right error response itself
+        (kept explicit at each call site rather than hidden in here, so
+        a handler can't forget to check it)."""
+        identity = pipeline.authenticate(
+            request.headers.get("authorization"),
+            token_verifier=token_verifier,
+            iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
+            iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
+            iam_tenant_resolver=iam_tenant_resolver,
+        )
+        pipeline.authorize(identity, required_role=settings.admin_required_role)
+        return identity
+
     async def set_tenant_state(request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
-            identity = pipeline.authenticate(
-                request.headers.get("authorization"),
-                token_verifier=token_verifier,
-                iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
-                iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
-                iam_tenant_resolver=iam_tenant_resolver,
-            )
-            pipeline.authorize(identity, required_role=settings.admin_required_role)
+            identity = _authenticate_admin(request)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -96,14 +107,7 @@ def build_admin_router(
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
-            identity = pipeline.authenticate(
-                request.headers.get("authorization"),
-                token_verifier=token_verifier,
-                iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
-                iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
-                iam_tenant_resolver=iam_tenant_resolver,
-            )
-            pipeline.authorize(identity, required_role=settings.admin_required_role)
+            _authenticate_admin(request)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -129,7 +133,96 @@ def build_admin_router(
 
         return JSONResponse({"tenants": tenants})
 
+    async def list_tenants(request: Request) -> JSONResponse:
+        """M10 portal: full tenant policy listing (state, models,
+        quota, budget, guardrail_policy, route_set) -- get_usage above
+        only exposes spend/budget, this is the rest of TenantPolicy."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            _authenticate_admin(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        tenants = []
+        for tenant_id in policy_store.list_tenant_ids():
+            policy = policy_cache.get(tenant_id)
+            tenants.append(
+                {
+                    "tenant_id": policy.tenant_id,
+                    "state": policy.state.value,
+                    "models": policy.models,
+                    "rpm_limit": policy.rpm_limit,
+                    "guardrail_policy": policy.guardrail_policy,
+                    "route_set": policy.route_set,
+                    "monthly_budget": policy.monthly_budget,
+                    "policy_epoch": policy.policy_epoch,
+                }
+            )
+
+        return JSONResponse({"tenants": tenants})
+
+    async def list_route_sets(request: Request) -> JSONResponse:
+        """M10 portal: route_sets.yaml plus each model's certification
+        status (M9) -- CertifiedRouter silently drops an uncertified
+        fallback from routing at runtime, so surfacing that here is
+        what lets an admin actually see why."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            _authenticate_admin(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        sets = []
+        for name, route_set in route_sets.items():
+            sets.append(
+                {
+                    "name": name,
+                    "primary": route_set.primary,
+                    "primary_certified": route_set.primary in certified_model_ids,
+                    "fallbacks": [
+                        {"model": m, "certified": m in certified_model_ids}
+                        for m in route_set.fallbacks
+                    ],
+                }
+            )
+
+        return JSONResponse({"route_sets": sets, "certified_models": sorted(certified_model_ids)})
+
+    async def list_applications(request: Request) -> JSONResponse:
+        """M10 portal: application grants configured on the AWS_IAM/
+        SigV4 auth path (auth/aws_iam.py's IamTenantResolver). The JWT
+        path has no equivalent registry -- any application_id embedded
+        in a validly-signed token is accepted, there's nothing to list
+        -- so this is necessarily a partial picture, labeled as such
+        rather than presented as a complete application inventory."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            _authenticate_admin(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        applications = [
+            {
+                "principal_arn": arn,
+                "tenant_id": grant.tenant_id,
+                "application_id": grant.application_id,
+                "roles": grant.roles,
+            }
+            for arn, grant in iam_tenant_resolver.list_grants().items()
+        ]
+
+        return JSONResponse({
+            "applications": applications,
+            "note": "AWS_IAM/SigV4 auth path only -- the JWT path has no application registry to list",
+        })
+
     return [
         Route("/v1/admin/tenants/{tenant_id}/state", set_tenant_state, methods=["PUT"]),
+        Route("/v1/admin/tenants", list_tenants, methods=["GET"]),
         Route("/v1/admin/usage", get_usage, methods=["GET"]),
+        Route("/v1/admin/route-sets", list_route_sets, methods=["GET"]),
+        Route("/v1/admin/applications", list_applications, methods=["GET"]),
     ]

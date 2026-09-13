@@ -40,6 +40,15 @@ class IamTenantResolver(Protocol):
         """Return the grant for a verified IAM principal ARN, or raise AuthError."""
         ...
 
+    def list_grants(self) -> Dict[str, IamPrincipalGrant]:
+        """M10 portal: every configured ARN pattern -> grant, for the
+        Applications page. Not a live/authoritative list of *callers*
+        (nothing observes who's actually calling), just the configured
+        grants -- the JWT auth path has no equivalent registry at all
+        (any application_id in a validly-signed token works), so this
+        can only ever show the AWS_IAM/SigV4 side of the picture."""
+        ...
+
 
 class FileIamTenantResolver:
     """Loads `policies/iam_tenants.yaml`'s `iam_principals` map once at
@@ -90,3 +99,8 @@ class FileIamTenantResolver:
             f"no tenant mapping for IAM principal '{principal_arn}'",
             code="UNKNOWN_IAM_PRINCIPAL",
         )
+
+    def list_grants(self) -> Dict[str, IamPrincipalGrant]:
+        merged: Dict[str, IamPrincipalGrant] = dict(self._exact)
+        merged.update({f"{prefix}*": grant for prefix, grant in self._prefixes.items()})
+        return merged

@@ -166,6 +166,8 @@ def create_app(
         token_verifier=token_verifier,
         iam_tenant_resolver=iam_tenant_resolver,
         usage_store=usage_store,
+        route_sets=route_sets,
+        certified_model_ids=certified_model_ids,
     )
     jobs_routes = build_jobs_router(
         settings=settings,
