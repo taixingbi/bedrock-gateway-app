@@ -18,18 +18,34 @@
 # routing/router.py's CertifiedRouter enforces it at runtime by
 # filtering any model not certified out of the candidate list.
 #
-# Only Nova Micro is confirmed accessible on this account (646821141010,
-# us-east-1) right now, so there are no fallbacks configured yet -- a
-# route_set with an empty fallback list behaves like a direct call (see
-# routing/router.py). Add a fallback model's inference profile ID here
-# once it's confirmed with `aws bedrock list-inference-profiles` +
-# `aws bedrock-runtime converse` (see docs/LOAD_TESTING.md).
+# Fallback order: cheapest/same-family first (nova-lite), then two
+# different model providers for real outage diversity (llama3.3-70b,
+# qwen3-32b), then the priciest/most-capable as a last resort
+# (nova-pro) -- not a quality ranking, a "how bad does it have to get
+# before we pay more" ordering (see routing/router.py's fallback
+# semantics).
+#
+# deepseek-r1 (us.deepseek.r1-v1:0) was evaluated and deliberately left
+# out: it answers entirely via a `reasoningContent` block, not `text`,
+# and never reaches a final answer within the golden dataset harness's
+# 128-token budget (stopReason: max_tokens) -- a real harness/model-
+# family mismatch, not a capability gap worth hiding. Needs a
+# reasoning-model-aware eval path (larger token budget, extracting
+# reasoningContent) before it can be fairly certified.
 
 route_sets:
   finance-chat-v1:
     primary: us.amazon.nova-micro-v1:0
-    fallbacks: []
+    fallbacks:
+      - us.amazon.nova-lite-v1:0
+      - us.meta.llama3-3-70b-instruct-v1:0
+      - qwen.qwen3-32b-v1:0
+      - us.amazon.nova-pro-v1:0
 
   search-chat-v1:
     primary: us.amazon.nova-micro-v1:0
-    fallbacks: []
+    fallbacks:
+      - us.amazon.nova-lite-v1:0
+      - us.meta.llama3-3-70b-instruct-v1:0
+      - qwen.qwen3-32b-v1:0
+      - us.amazon.nova-pro-v1:0

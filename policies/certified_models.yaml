@@ -28,6 +28,12 @@
 # Rollback: revert the commit that added/changed an entry here and
 # re-promote -- no separate rollback mechanism, this is just policy
 # data like tenants.yaml/route_sets.yaml.
+#
+# deepseek-r1 (us.deepseek.r1-v1:0) was evaluated and did NOT certify:
+# it answers entirely via a `reasoningContent` block, not `text`, and
+# never reaches a final answer within run_eval.py's 128-token budget
+# (stopReason: max_tokens). Needs a reasoning-model-aware eval path
+# before it can be fairly certified -- see route_sets.yaml's comment.
 
 certified_models:
   us.amazon.nova-micro-v1:0:
@@ -36,3 +42,27 @@ certified_models:
     p95_latency_ms: 388.64
     cost_per_request: 1.17e-06
     certified_at: '2026-09-13'
+  us.amazon.nova-lite-v1:0:
+    quality_score: 1.0
+    safety_score: 1.0
+    p95_latency_ms: 574.67
+    cost_per_request: 1.33e-06
+    certified_at: '2026-09-14'
+  us.amazon.nova-pro-v1:0:
+    quality_score: 1.0
+    safety_score: 1.0
+    p95_latency_ms: 706.05
+    cost_per_request: 2.633e-05
+    certified_at: '2026-09-14'
+  us.meta.llama3-3-70b-instruct-v1:0:
+    quality_score: 1.0
+    safety_score: 1.0
+    p95_latency_ms: 283.81
+    cost_per_request: 0.000196
+    certified_at: '2026-09-14'
+  qwen.qwen3-32b-v1:0:
+    quality_score: 1.0
+    safety_score: 1.0
+    p95_latency_ms: 380.98
+    cost_per_request: 0.000128
+    certified_at: '2026-09-14'
