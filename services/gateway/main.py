@@ -19,8 +19,16 @@ from starlette.responses import JSONResponse
 
 from .api.admin_routes import build_admin_router
 from .api.jobs_routes import build_jobs_router
+from .api.onboarding_routes import build_onboarding_router
 from .api.routes import build_router
-from .auth.aws_iam import FileIamTenantResolver, IamTenantResolver
+from .auth.aws_iam import (
+    DynamoDbIamTenantResolver,
+    FileIamTenantResolver,
+    IamTenantResolver,
+    InMemoryIamTenantResolver,
+    LayeredIamTenantResolver,
+    ProvisionedIamTenantResolver,
+)
 from .auth.devkeys import load_or_create_dev_keypair
 from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .cache.store import InMemoryResponseCache, ResponseCache
@@ -30,9 +38,18 @@ from .guardrails.client import GuardrailClient
 from .inference.bedrock_client import BedrockClient, ConverseClient
 from .jobs.queue import InMemoryJobQueue, JobQueue, SqsJobQueue
 from .jobs.store import DynamoDbJobStore, InMemoryJobStore, JobStore
+from .onboarding.audit import AuditStore, DynamoDbAuditStore, InMemoryAuditStore
+from .onboarding.store import DynamoDbOnboardingStore, InMemoryOnboardingStore, OnboardingStore
 from .policy.cache import PolicySnapshotCache
 from .policy.rate_limiter import TokenBucketRateLimiter
-from .policy.store import FilePolicyStore, PolicyStore
+from .policy.store import (
+    DynamoDbPolicyStore,
+    FilePolicyStore,
+    InMemoryPolicyStore,
+    LayeredPolicyStore,
+    PolicyStore,
+    ProvisionedPolicyStore,
+)
 from .routing.certification import certified_model_ids as _certified_model_ids_from
 from .routing.certification import load_certified_models_from_yaml
 from .routing.circuit_breaker import CircuitBreaker
@@ -78,6 +95,10 @@ def create_app(
     job_queue: Optional[JobQueue] = None,
     usage_store: Optional[UsageStore] = None,
     certified_model_ids: Optional[Set[str]] = None,
+    onboarding_store: Optional[OnboardingStore] = None,
+    onboarding_audit_store: Optional[AuditStore] = None,
+    policy_store_primary: Optional[ProvisionedPolicyStore] = None,
+    iam_tenant_resolver_primary: Optional[ProvisionedIamTenantResolver] = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(settings.service_name, settings.log_level)
@@ -90,10 +111,40 @@ def create_app(
         )
     if token_verifier is None:
         token_verifier = _build_default_token_verifier(settings)
+    # M11: primary (provisioned-application) stores exist independently
+    # of whether iam_tenant_resolver/policy_store were overridden below
+    # -- onboarding_routes.py always needs something to write to.
+    if iam_tenant_resolver_primary is None:
+        iam_tenant_resolver_primary = (
+            DynamoDbIamTenantResolver(
+                table_name=settings.provisioned_principal_mappings_table_name, region=settings.aws_region
+            )
+            if settings.provisioned_principal_mappings_table_name
+            else InMemoryIamTenantResolver()
+        )
+    if policy_store_primary is None:
+        policy_store_primary = (
+            DynamoDbPolicyStore(
+                table_name=settings.provisioned_tenant_policies_table_name, region=settings.aws_region
+            )
+            if settings.provisioned_tenant_policies_table_name
+            else InMemoryPolicyStore({})
+        )
+
+    # Only auto-layer the *default* file-based stores this function
+    # constructs itself -- a caller-supplied policy_store/
+    # iam_tenant_resolver (every existing test) is used exactly as
+    # given, unwrapped, so nothing about their behavior changes.
     if iam_tenant_resolver is None:
-        iam_tenant_resolver = FileIamTenantResolver(settings.iam_tenants_path)
+        iam_tenant_resolver = LayeredIamTenantResolver(
+            primary=iam_tenant_resolver_primary,
+            fallback=FileIamTenantResolver(settings.iam_tenants_path),
+        )
     if policy_store is None:
-        policy_store = FilePolicyStore(settings.tenant_policy_path)
+        policy_store = LayeredPolicyStore(
+            primary=policy_store_primary,
+            fallback=FilePolicyStore(settings.tenant_policy_path),
+        )
     if guardrail_client is None:
         guardrail_client = BasicGuardrailClient()
     if response_cache is None:
@@ -144,6 +195,18 @@ def create_app(
             if settings.usage_table_name
             else InMemoryUsageStore()
         )
+    if onboarding_store is None:
+        onboarding_store = (
+            DynamoDbOnboardingStore(table_name=settings.onboarding_requests_table_name, region=settings.aws_region)
+            if settings.onboarding_requests_table_name
+            else InMemoryOnboardingStore()
+        )
+    if onboarding_audit_store is None:
+        onboarding_audit_store = (
+            DynamoDbAuditStore(table_name=settings.onboarding_audit_table_name, region=settings.aws_region)
+            if settings.onboarding_audit_table_name
+            else InMemoryAuditStore()
+        )
 
     router_ = build_router(
         router=router,
@@ -180,6 +243,16 @@ def create_app(
         job_queue=job_queue,
         usage_store=usage_store,
         certified_model_ids=certified_model_ids,
+    )
+    onboarding_router = build_onboarding_router(
+        onboarding_store=onboarding_store,
+        audit_store=onboarding_audit_store,
+        policy_store=policy_store,
+        policy_store_primary=policy_store_primary,
+        iam_tenant_resolver=iam_tenant_resolver,
+        iam_tenant_resolver_primary=iam_tenant_resolver_primary,
+        settings=settings,
+        token_verifier=token_verifier,
     )
 
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
@@ -223,6 +296,7 @@ def create_app(
     app.include_router(router_)
     app.include_router(admin_router)
     app.include_router(jobs_router)
+    app.include_router(onboarding_router)
     app.state.settings = settings
     return app
 

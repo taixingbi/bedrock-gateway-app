@@ -106,3 +106,27 @@ class SetTenantStateBody(BaseModel):
     # to keep its existing custom "'state' must be one of [...]" error
     # message and code rather than FastAPI's own enum-validation shape.
     state: str
+
+
+class OnboardingRequestBody(BaseModel):
+    """POST /v1/admin/onboarding-requests (M11, plan section 22.1).
+    Same fields the portal's "New Application" form collects."""
+
+    tenant_id: str = Field(min_length=1)
+    application_id: str = Field(min_length=1)
+    environment: str = Field(default="dev")
+    # Left as a permissive str, same reasoning as SetTenantStateBody.state
+    # -- onboarding_routes.py validates it against AuthType manually.
+    auth_type: str
+    principal_arn: Optional[str] = Field(
+        default=None, description="Required when auth_type='iam'."
+    )
+    requested_models: List[str] = Field(default_factory=list)
+    rpm_limit: int = Field(default=60, ge=1)
+    monthly_budget: Optional[float] = Field(default=None, gt=0)
+    guardrail_policy: str = Field(default="standard-v1")
+    data_classification: str = Field(default="internal")
+
+
+class RejectOnboardingRequestBody(BaseModel):
+    reason: str = Field(min_length=1)

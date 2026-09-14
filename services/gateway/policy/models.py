@@ -60,3 +60,14 @@ class UnknownTenantError(Exception):
     def __init__(self, tenant_id: str):
         super().__init__(f"no policy configured for tenant_id={tenant_id!r}")
         self.tenant_id = tenant_id
+
+
+class TenantAlreadyExistsError(Exception):
+    """M11: DynamoDbPolicyStore.create()/InMemoryPolicyStore.create()
+    raise this on a conditional-write conflict -- the authoritative
+    check (not a caller's own exists()-then-create(), which would
+    still race under concurrent provisioning requests)."""
+
+    def __init__(self, tenant_id: str):
+        super().__init__(f"tenant_id={tenant_id!r} is already provisioned")
+        self.tenant_id = tenant_id

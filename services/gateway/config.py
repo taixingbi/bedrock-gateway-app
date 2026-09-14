@@ -83,6 +83,16 @@ class Settings:
     # DynamoDB-backed one, same fallback pattern as jobs_table_name.
     usage_table_name: str
 
+    # M11 Application Onboarding -- all empty means in-memory stores
+    # (tests, or an environment that hasn't applied the M11 tables
+    # yet); *_table_name empty specifically also means policy_store/
+    # iam_tenant_resolver stay plain FilePolicyStore/FileIamTenantResolver
+    # rather than being wrapped in a Layered* store (see main.py).
+    onboarding_requests_table_name: str
+    onboarding_audit_table_name: str
+    provisioned_tenant_policies_table_name: str
+    provisioned_principal_mappings_table_name: str
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -125,4 +135,10 @@ def load_settings() -> Settings:
         jobs_queue_url=os.environ.get("JOBS_QUEUE_URL", ""),
         jobs_table_name=os.environ.get("JOBS_TABLE_NAME", ""),
         usage_table_name=os.environ.get("USAGE_TABLE_NAME", ""),
+        onboarding_requests_table_name=os.environ.get("ONBOARDING_REQUESTS_TABLE_NAME", ""),
+        onboarding_audit_table_name=os.environ.get("ONBOARDING_AUDIT_TABLE_NAME", ""),
+        provisioned_tenant_policies_table_name=os.environ.get("PROVISIONED_TENANT_POLICIES_TABLE_NAME", ""),
+        provisioned_principal_mappings_table_name=os.environ.get(
+            "PROVISIONED_PRINCIPAL_MAPPINGS_TABLE_NAME", ""
+        ),
     )

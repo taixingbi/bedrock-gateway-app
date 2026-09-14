@@ -104,3 +104,150 @@ class FileIamTenantResolver:
         merged: Dict[str, IamPrincipalGrant] = dict(self._exact)
         merged.update({f"{prefix}*": grant for prefix, grant in self._prefixes.items()})
         return merged
+
+
+class ProvisionedIamTenantResolver(IamTenantResolver, Protocol):
+    """M11: an IamTenantResolver that also supports onboarding's
+    create-only write -- `InMemoryIamTenantResolver` and
+    `DynamoDbIamTenantResolver` both satisfy this; `FileIamTenantResolver`
+    deliberately doesn't (existing hand-managed grants are never
+    created through this path)."""
+
+    def put_grant(self, principal_arn: str, grant: IamPrincipalGrant) -> None:
+        """Raises PrincipalAlreadyMappedError on conflict."""
+        ...
+
+
+class PrincipalAlreadyMappedError(Exception):
+    """M11: raised by put_grant() on a conditional-write conflict --
+    the authoritative check, not a caller's own resolve()-then-
+    put_grant(), which would still race under concurrent onboarding
+    requests for the same ARN."""
+
+    def __init__(self, principal_arn: str):
+        super().__init__(f"principal '{principal_arn}' is already mapped")
+        self.principal_arn = principal_arn
+
+
+class InMemoryIamTenantResolver:
+    """M11: in-memory ProvisionedIamTenantResolver, the AWS_IAM-path
+    equivalent of policy/store.py's InMemoryPolicyStore -- what tests
+    and any environment without a principal-mappings table configured
+    get instead of DynamoDbIamTenantResolver."""
+
+    def __init__(self) -> None:
+        self._grants: Dict[str, IamPrincipalGrant] = {}
+
+    def put_grant(self, principal_arn: str, grant: IamPrincipalGrant) -> None:
+        if principal_arn in self._grants:
+            raise PrincipalAlreadyMappedError(principal_arn)
+        self._grants[principal_arn] = grant
+
+    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+        grant = self._grants.get(principal_arn)
+        if grant is None:
+            raise AuthError(
+                f"no tenant mapping for IAM principal '{principal_arn}'",
+                code="UNKNOWN_IAM_PRINCIPAL",
+            )
+        return grant
+
+    def list_grants(self) -> Dict[str, IamPrincipalGrant]:
+        return dict(self._grants)
+
+
+class DynamoDbIamTenantResolver:
+    """Real, durable principal-mapping storage (M11, plan section
+    22.3) -- the AWS_IAM-path equivalent of policy/store.py's
+    DynamoDbPolicyStore, for the exact same reason: a principal mapping
+    *provisioned* through onboarding (onboarding/provisioning.py)
+    shouldn't require a `policies/iam_tenants.yaml` PR to take effect.
+    Used as a layer (`LayeredIamTenantResolver` below), never a
+    replacement for `FileIamTenantResolver`.
+
+    Exact-ARN lookups only -- no prefix/wildcard matching. An
+    onboarding request names one specific principal ARN; the "*"
+    session-name-wildcard case (FileIamTenantResolver's `_prefixes`)
+    only makes sense for hand-authored, review-gated entries.
+    """
+
+    def __init__(self, *, table_name: str, region: str):
+        import boto3
+
+        self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
+
+    def put_grant(self, principal_arn: str, grant: IamPrincipalGrant) -> None:
+        """Provisioning-only: fails if this ARN is already mapped here,
+        so onboarding can never silently overwrite an existing
+        provisioned grant. Does not protect against colliding with a
+        *file*-configured ARN -- callers must check
+        `LayeredIamTenantResolver` first."""
+        from botocore.exceptions import ClientError
+
+        try:
+            self._table.put_item(
+                Item={
+                    "principal_arn": principal_arn,
+                    "tenant_id": grant.tenant_id,
+                    "application_id": grant.application_id,
+                    "roles": list(grant.roles),
+                },
+                ConditionExpression="attribute_not_exists(principal_arn)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise PrincipalAlreadyMappedError(principal_arn) from exc
+            raise
+
+    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+        response = self._table.get_item(Key={"principal_arn": principal_arn})
+        item = response.get("Item")
+        if item is None:
+            raise AuthError(
+                f"no tenant mapping for IAM principal '{principal_arn}'",
+                code="UNKNOWN_IAM_PRINCIPAL",
+            )
+        return IamPrincipalGrant(
+            tenant_id=item["tenant_id"],
+            application_id=item["application_id"],
+            roles=list(item.get("roles", [])),
+        )
+
+    def list_grants(self) -> Dict[str, IamPrincipalGrant]:
+        merged: Dict[str, IamPrincipalGrant] = {}
+        kwargs: Dict[str, object] = {}
+        while True:
+            response = self._table.scan(**kwargs)
+            for item in response.get("Items", []):
+                merged[item["principal_arn"]] = IamPrincipalGrant(
+                    tenant_id=item["tenant_id"],
+                    application_id=item["application_id"],
+                    roles=list(item.get("roles", [])),
+                )
+            if "LastEvaluatedKey" not in response:
+                break
+            kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+        return merged
+
+
+class LayeredIamTenantResolver:
+    """`primary` (provisioned/DynamoDB) checked first, `fallback`
+    (hand-configured/file) second -- additive, mirrors
+    policy/store.py's LayeredPolicyStore. A given ARN can only ever be
+    mapped in one layer (provisioning refuses to create a grant for an
+    ARN the fallback already maps -- see onboarding/provisioning.py)."""
+
+    def __init__(self, *, primary: ProvisionedIamTenantResolver, fallback: IamTenantResolver):
+        self._primary = primary
+        self._fallback = fallback
+
+    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+        try:
+            return self._primary.resolve(principal_arn)
+        except AuthError:
+            return self._fallback.resolve(principal_arn)
+
+    def list_grants(self) -> Dict[str, IamPrincipalGrant]:
+        merged = dict(self._fallback.list_grants())
+        merged.update(self._primary.list_grants())
+        return merged
