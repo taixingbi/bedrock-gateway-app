@@ -251,3 +251,65 @@ class LayeredIamTenantResolver:
         merged = dict(self._fallback.list_grants())
         merged.update(self._primary.list_grants())
         return merged
+
+
+class HttpIamTenantResolver:
+    """M12 (plan.md Section 5): delegates principal mapping to
+    bedrock-authz-service's `POST /v1/authorize` instead of resolving
+    it in-process. Satisfies the same `IamTenantResolver` Protocol
+    every other resolver in this file does -- wired in at main.py as a
+    straight swap for `LayeredIamTenantResolver` when
+    `AUTHZ_SERVICE_URL` is configured, so no route handler or pipeline
+    stage changes; this is the seam the Protocol already existed for.
+
+    urllib.request, not a new HTTP client dependency -- same choice
+    jwt_verifier.py's JwksVerifier already made for its own outbound
+    call.
+    """
+
+    def __init__(self, *, base_url: str, timeout_s: float = 5.0):
+        self._base_url = base_url.rstrip("/")
+        self._timeout_s = timeout_s
+
+    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+        import json
+        import urllib.error
+        import urllib.request
+
+        body = json.dumps(
+            {"identity": {"subject": principal_arn, "auth_type": "aws_iam"}, "action": "llm.invoke"}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self._base_url}/v1/authorize",
+            data=body,
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_s) as resp:  # noqa: S310 (fixed internal URL, not user input)
+                data = json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            raise AuthError(
+                f"authz-service unavailable: {exc}", code="AUTHORIZATION_SERVICE_UNAVAILABLE"
+            ) from exc
+
+        if data["decision"] != "ALLOW":
+            raise AuthError(
+                f"no tenant mapping for IAM principal '{principal_arn}'", code="UNKNOWN_IAM_PRINCIPAL"
+            )
+        return IamPrincipalGrant(
+            tenant_id=data["tenant_id"], application_id=data["application_id"], roles=list(data["roles"])
+        )
+
+    def list_grants(self) -> Dict[str, IamPrincipalGrant]:
+        import json
+        import urllib.request
+
+        with urllib.request.urlopen(f"{self._base_url}/v1/grants", timeout=self._timeout_s) as resp:  # noqa: S310
+            data = json.loads(resp.read())
+        return {
+            arn: IamPrincipalGrant(
+                tenant_id=g["tenant_id"], application_id=g["application_id"], roles=list(g["roles"])
+            )
+            for arn, g in data["grants"].items()
+        }

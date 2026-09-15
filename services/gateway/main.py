@@ -24,6 +24,7 @@ from .api.routes import build_router
 from .auth.aws_iam import (
     DynamoDbIamTenantResolver,
     FileIamTenantResolver,
+    HttpIamTenantResolver,
     IamTenantResolver,
     InMemoryIamTenantResolver,
     LayeredIamTenantResolver,
@@ -136,9 +137,17 @@ def create_app(
     # iam_tenant_resolver (every existing test) is used exactly as
     # given, unwrapped, so nothing about their behavior changes.
     if iam_tenant_resolver is None:
-        iam_tenant_resolver = LayeredIamTenantResolver(
-            primary=iam_tenant_resolver_primary,
-            fallback=FileIamTenantResolver(settings.iam_tenants_path),
+        # M12: bedrock-authz-service does its own file+Dynamo layering
+        # internally (same tables/policies file, read-only there) --
+        # when it's configured, this app defers principal-mapping
+        # entirely rather than doing it twice.
+        iam_tenant_resolver = (
+            HttpIamTenantResolver(base_url=settings.authz_service_url)
+            if settings.authz_service_url
+            else LayeredIamTenantResolver(
+                primary=iam_tenant_resolver_primary,
+                fallback=FileIamTenantResolver(settings.iam_tenants_path),
+            )
         )
     if policy_store is None:
         policy_store = LayeredPolicyStore(

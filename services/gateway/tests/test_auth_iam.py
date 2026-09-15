@@ -248,5 +248,70 @@ class ChatEndpointIamAuthTests(unittest.TestCase):
         self.assertEqual(resp.json()["error"]["code"], "UNKNOWN_IAM_PRINCIPAL")
 
 
+class HttpIamTenantResolverTests(unittest.TestCase):
+    """M12: HttpIamTenantResolver delegates to bedrock-authz-service's
+    POST /v1/authorize -- these mock the HTTP layer (urllib), not a
+    real service, since that's bedrock-authz-service's own test suite's
+    job."""
+
+    def _fake_urlopen(self, response_body: bytes):
+        import io
+        from unittest.mock import patch
+
+        class _Resp:
+            def __enter__(self_):
+                return io.BytesIO(response_body)
+
+            def __exit__(self_, *args):
+                return False
+
+        return patch("urllib.request.urlopen", return_value=_Resp())
+
+    def test_allow_response_resolves_to_grant(self):
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        body = (
+            b'{"decision":"ALLOW","tenant_id":"search","application_id":"search-dev",'
+            b'"roles":["developer"],"policy_id":"iam-principal-mapping-v1","reason":"principal is mapped"}'
+        )
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        with self._fake_urlopen(body):
+            grant = resolver.resolve("arn:aws:iam::123:role/x")
+
+        self.assertEqual(grant.tenant_id, "search")
+        self.assertEqual(grant.application_id, "search-dev")
+        self.assertEqual(grant.roles, ["developer"])
+
+    def test_deny_response_raises_unknown_principal(self):
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        body = (
+            b'{"decision":"DENY","tenant_id":null,"application_id":null,'
+            b'"roles":[],"policy_id":"iam-principal-mapping-v1","reason":"no tenant mapping"}'
+        )
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        with self._fake_urlopen(body):
+            with self.assertRaises(AuthError) as ctx:
+                resolver.resolve("arn:aws:iam::123:role/nobody")
+
+        self.assertEqual(ctx.exception.code, "UNKNOWN_IAM_PRINCIPAL")
+
+    def test_unreachable_service_raises_service_unavailable(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+            with self.assertRaises(AuthError) as ctx:
+                resolver.resolve("arn:aws:iam::123:role/x")
+
+        self.assertEqual(ctx.exception.code, "AUTHORIZATION_SERVICE_UNAVAILABLE")
+
+
 if __name__ == "__main__":
     unittest.main()

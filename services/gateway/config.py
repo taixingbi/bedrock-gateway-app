@@ -93,6 +93,13 @@ class Settings:
     provisioned_tenant_policies_table_name: str
     provisioned_principal_mappings_table_name: str
 
+    # M12 (plan.md Section 5) -- empty means resolve AWS_IAM principals
+    # in-process (LayeredIamTenantResolver, unchanged default); set
+    # means delegate to bedrock-authz-service instead
+    # (HttpIamTenantResolver). Same "seam + fallback" shape as every
+    # other *_TABLE_NAME/*_URL setting in this file.
+    authz_service_url: str
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -141,4 +148,5 @@ def load_settings() -> Settings:
         provisioned_principal_mappings_table_name=os.environ.get(
             "PROVISIONED_PRINCIPAL_MAPPINGS_TABLE_NAME", ""
         ),
+        authz_service_url=os.environ.get("AUTHZ_SERVICE_URL", ""),
     )
