@@ -30,6 +30,7 @@ reflect what the model actually does, not a stand-in.
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import sys
 import time
@@ -145,8 +146,14 @@ def write_certification(result: EvalResult, *, certified_models_path: str) -> No
         "cost_per_request": result.cost_per_request,
         "certified_at": time.strftime("%Y-%m-%d", time.gmtime()),
     }
-    with open(path, "w", encoding="utf-8") as f:
+    # Atomic: write to a sibling temp file and rename over the original,
+    # so a process kill/crash mid-write can never leave a truncated or
+    # half-written certified_models.yaml -- CertifiedRouter loads this
+    # file at startup and a corrupt one fails every route.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False)
+    os.replace(tmp_path, path)
 
 
 def main() -> None:
