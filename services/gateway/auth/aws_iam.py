@@ -36,8 +36,13 @@ class IamPrincipalGrant:
 
 
 class IamTenantResolver(Protocol):
-    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
-        """Return the grant for a verified IAM principal ARN, or raise AuthError."""
+    def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
+        """Return the grant for a verified IAM principal ARN, or raise AuthError.
+
+        `request_id` is optional and only meaningful to `HttpIamTenantResolver`
+        (forwarded as the `x-request-id` header so a decision logged by
+        platform-authz-service can be correlated back to the request that
+        triggered it) -- every in-process resolver ignores it."""
         ...
 
     def list_grants(self) -> Dict[str, IamPrincipalGrant]:
@@ -86,7 +91,7 @@ class FileIamTenantResolver:
             else:
                 self._exact[arn_pattern] = grant
 
-    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+    def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
         grant = self._exact.get(principal_arn)
         if grant is not None:
             return grant
@@ -143,7 +148,7 @@ class InMemoryIamTenantResolver:
             raise PrincipalAlreadyMappedError(principal_arn)
         self._grants[principal_arn] = grant
 
-    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+    def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
         grant = self._grants.get(principal_arn)
         if grant is None:
             raise AuthError(
@@ -199,7 +204,7 @@ class DynamoDbIamTenantResolver:
                 raise PrincipalAlreadyMappedError(principal_arn) from exc
             raise
 
-    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+    def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
         response = self._table.get_item(Key={"principal_arn": principal_arn})
         item = response.get("Item")
         if item is None:
@@ -241,11 +246,11 @@ class LayeredIamTenantResolver:
         self._primary = primary
         self._fallback = fallback
 
-    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+    def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
         try:
-            return self._primary.resolve(principal_arn)
+            return self._primary.resolve(principal_arn, request_id=request_id)
         except AuthError:
-            return self._fallback.resolve(principal_arn)
+            return self._fallback.resolve(principal_arn, request_id=request_id)
 
     def list_grants(self) -> Dict[str, IamPrincipalGrant]:
         merged = dict(self._fallback.list_grants())
@@ -271,7 +276,7 @@ class HttpIamTenantResolver:
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
 
-    def resolve(self, principal_arn: str) -> IamPrincipalGrant:
+    def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
         import json
         import urllib.error
         import urllib.request
@@ -279,10 +284,17 @@ class HttpIamTenantResolver:
         body = json.dumps(
             {"identity": {"subject": principal_arn, "auth_type": "aws_iam"}, "action": "llm.invoke"}
         ).encode("utf-8")
+        headers = {"content-type": "application/json"}
+        if request_id:
+            # Lets platform-authz-service's own decision log carry the
+            # SAME request_id as this request's gateway.chat/gateway.access
+            # lines, instead of minting an unrelated one -- see
+            # authz-service's main.py, which honors this header.
+            headers["x-request-id"] = request_id
         request = urllib.request.Request(
             f"{self._base_url}/v1/authorize",
             data=body,
-            headers={"content-type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

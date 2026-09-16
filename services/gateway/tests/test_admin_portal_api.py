@@ -16,7 +16,7 @@ class FakeIamTenantResolver:
     def __init__(self, grants):
         self._grants = grants
 
-    def resolve(self, principal_arn):
+    def resolve(self, principal_arn, *, request_id=None):
         return self._grants[principal_arn]
 
     def list_grants(self):

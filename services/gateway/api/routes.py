@@ -93,6 +93,7 @@ def build_router(
                     iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
                     iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
                     iam_tenant_resolver=iam_tenant_resolver,
+                    request_id=request_id,
                 )
                 pipeline.authorize(identity, required_role=settings.chat_required_role)
                 policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)
