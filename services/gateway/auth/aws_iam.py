@@ -255,7 +255,7 @@ class LayeredIamTenantResolver:
 
 class HttpIamTenantResolver:
     """M12 (plan.md Section 5): delegates principal mapping to
-    bedrock-authz-service's `POST /v1/authorize` instead of resolving
+    platform-authz-service's `POST /v1/authorize` instead of resolving
     it in-process. Satisfies the same `IamTenantResolver` Protocol
     every other resolver in this file does -- wired in at main.py as a
     straight swap for `LayeredIamTenantResolver` when

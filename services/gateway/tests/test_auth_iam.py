@@ -249,9 +249,9 @@ class ChatEndpointIamAuthTests(unittest.TestCase):
 
 
 class HttpIamTenantResolverTests(unittest.TestCase):
-    """M12: HttpIamTenantResolver delegates to bedrock-authz-service's
+    """M12: HttpIamTenantResolver delegates to platform-authz-service's
     POST /v1/authorize -- these mock the HTTP layer (urllib), not a
-    real service, since that's bedrock-authz-service's own test suite's
+    real service, since that's platform-authz-service's own test suite's
     job."""
 
     def _fake_urlopen(self, response_body: bytes):

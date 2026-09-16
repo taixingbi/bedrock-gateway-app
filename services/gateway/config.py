@@ -95,7 +95,7 @@ class Settings:
 
     # M12 (plan.md Section 5) -- empty means resolve AWS_IAM principals
     # in-process (LayeredIamTenantResolver, unchanged default); set
-    # means delegate to bedrock-authz-service instead
+    # means delegate to platform-authz-service instead
     # (HttpIamTenantResolver). Same "seam + fallback" shape as every
     # other *_TABLE_NAME/*_URL setting in this file.
     authz_service_url: str

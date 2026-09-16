@@ -137,7 +137,7 @@ def create_app(
     # iam_tenant_resolver (every existing test) is used exactly as
     # given, unwrapped, so nothing about their behavior changes.
     if iam_tenant_resolver is None:
-        # M12: bedrock-authz-service does its own file+Dynamo layering
+        # M12: platform-authz-service does its own file+Dynamo layering
         # internally (same tables/policies file, read-only there) --
         # when it's configured, this app defers principal-mapping
         # entirely rather than doing it twice.
