@@ -45,3 +45,19 @@ iam_principals:
     tenant_id: team-a
     application_id: manual-smoke-test
     roles: [developer]
+
+  # Manual curl/smoke testing against the finance tenant specifically
+  # (dev only) -- finance has a real monthly_budget (tenants.yaml),
+  # unlike team-a's deliberately-tiny smoke-test budget above, so this
+  # is the entry to use to see an actual model response rather than an
+  # immediate BUDGET_EXCEEDED. Assumed via `aws sts assume-role` from
+  # the taixingbi user (see the role's trust policy).
+  "arn:aws:iam::646821141010:role/finance-manual-smoke-test":
+    tenant_id: finance
+    application_id: finance-manual-smoke-test
+    roles: [developer]
+
+  "arn:aws:sts::646821141010:assumed-role/finance-manual-smoke-test/*":
+    tenant_id: finance
+    application_id: finance-manual-smoke-test
+    roles: [developer]
