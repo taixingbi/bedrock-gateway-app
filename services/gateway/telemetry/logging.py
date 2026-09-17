@@ -23,12 +23,13 @@ telemetry/middleware.py from the inbound `x-session-id` header (empty
 when the caller didn't send one) -- unlike request_id, no session_id
 is invented when absent, since a made-up one wouldn't actually group
 anything. `api_gateway_request_id` comes from `api_gateway_request_id_ctx`,
-set from the inbound `Apigw-Requestid` header -- API Gateway adds this
-automatically to every integration request it forwards (distinct from
-any custom header), carrying the SAME value platform-api-gateway's own
-access log calls `api_gateway_request_id` (renamed from the AWS
-default `requestId` for exactly this reason), so the two logs can be
-joined on it even though that access log can carry none of the other
+set from the inbound `X-Apigw-Request-Id` header -- platform-api-gateway
+maps its own `$context.requestId` onto this header explicitly (the bare
+name "apigw-requestid" is AWS-reserved, confirmed live: 400s any
+mapping operation at all, read or write), carrying the SAME value that
+repo's own access log calls `api_gateway_request_id` (renamed from the
+AWS default `requestId` for exactly this reason), so the two logs can
+be joined on it even though that access log can carry none of the other
 IDs here (see platform-api-gateway's own module comment -- API Gateway
 access logs can't read arbitrary request headers at all). Absent
 entirely for calls that never went through API Gateway (e.g. local
@@ -63,9 +64,8 @@ _RESERVED_LOGRECORD_KEYS = {
 # without each call site having to pass it explicitly.
 session_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("gateway_session_id", default="")
 
-# Same idea, from the inbound Apigw-Requestid header (API Gateway adds
-# this to every integration request automatically -- see module
-# docstring).
+# Same idea, from the inbound X-Apigw-Request-Id header -- see module
+# docstring.
 api_gateway_request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "gateway_api_gateway_request_id", default=""
 )

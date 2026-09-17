@@ -11,10 +11,11 @@ session_id works the same way except it's never invented when absent
 (read from `X-Session-Id`, empty if the caller didn't send one) -- a
 random session_id wouldn't actually group anything, unlike request_id
 where any unique value is useful. api_gateway_request_id is the same
-idea again, but read from `Apigw-Requestid` (a header API Gateway
-itself adds to every integration request, not something a client
-sets) -- the join key back to platform-api-gateway's own access log
-(see telemetry/logging.py's module docstring for the full picture).
+idea again, but read from `X-Apigw-Request-Id` -- platform-api-gateway
+maps its own `$context.requestId` onto this header explicitly (not
+something AWS adds by itself, and not a header any client sets); the
+join key back to that repo's own access log (see telemetry/logging.py's
+module docstring for the full picture).
 
 This middleware also opens the OUTER span for the whole request
 (everything downstream, including route handlers' own child spans,
@@ -58,14 +59,14 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         session_id = request.headers.get("x-session-id") or ""
-        # API Gateway adds this to every integration request it forwards
-        # (not a header any client sets) -- the same value platform-api-
-        # gateway's own access log calls api_gateway_request_id, so the
-        # two logs can be joined on it. Not independently verified live
-        # yet (unlike the rest of this file) -- if this header turns out
-        # to be spelled/behave differently than expected, the field
-        # simply never appears; nothing else depends on it.
-        api_gateway_request_id = request.headers.get("apigw-requestid") or ""
+        # platform-api-gateway's own $context.requestId, mapped onto
+        # this header explicitly (not a header any client sets, and not
+        # something AWS adds by itself -- confirmed live: the bare name
+        # "apigw-requestid" is AWS-reserved and 400s any mapping
+        # operation at all, x- prefixed like every other custom header
+        # here). Same value platform-api-gateway's own access log calls
+        # api_gateway_request_id, so the two logs can be joined on it.
+        api_gateway_request_id = request.headers.get("x-apigw-request-id") or ""
         request_token = _request_id_ctx.set(request_id)
         session_token = session_id_ctx.set(session_id)
         api_gateway_request_id_token = api_gateway_request_id_ctx.set(api_gateway_request_id)
