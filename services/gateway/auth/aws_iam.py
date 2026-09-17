@@ -21,11 +21,15 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol
 
 import yaml
+from opentelemetry import trace
+from opentelemetry.propagate import inject
 
 from .identity import AuthError
 
 HEADER_PRINCIPAL_ARN = "x-platform-principal-arn"
 HEADER_ACCOUNT_ID = "x-platform-account-id"
+
+_tracer = trace.get_tracer(__name__)
 
 
 @dataclass(frozen=True)
@@ -294,39 +298,48 @@ class HttpIamTenantResolver:
         import urllib.error
         import urllib.request
 
-        body = json.dumps(
-            {"identity": {"subject": principal_arn, "auth_type": "aws_iam"}, "action": "llm.invoke"}
-        ).encode("utf-8")
-        headers = {"content-type": "application/json"}
-        if request_id:
-            # Lets platform-authz-service's own decision log carry the
-            # SAME request_id as this request's gateway.chat/gateway.access
-            # lines, instead of minting an unrelated one -- see
-            # authz-service's main.py, which honors this header.
-            headers["x-request-id"] = request_id
-        request = urllib.request.Request(
-            f"{self._base_url}/v1/authorize",
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=self._timeout_s, context=self._ssl_context
-            ) as resp:  # noqa: S310 (fixed internal URL, not user input)
-                data = json.loads(resp.read())
-        except urllib.error.URLError as exc:
-            raise AuthError(
-                f"authz-service unavailable: {exc}", code="AUTHORIZATION_SERVICE_UNAVAILABLE"
-            ) from exc
-
-        if data["decision"] != "ALLOW":
-            raise AuthError(
-                f"no tenant mapping for IAM principal '{principal_arn}'", code="UNKNOWN_IAM_PRINCIPAL"
+        with _tracer.start_as_current_span("authz.authorize") as span:
+            body = json.dumps(
+                {"identity": {"subject": principal_arn, "auth_type": "aws_iam"}, "action": "llm.invoke"}
+            ).encode("utf-8")
+            headers = {"content-type": "application/json"}
+            if request_id:
+                # Lets platform-authz-service's own decision log carry the
+                # SAME request_id as this request's gateway.chat/gateway.access
+                # lines, instead of minting an unrelated one -- see
+                # authz-service's main.py, which honors this header.
+                headers["x-request-id"] = request_id
+            # W3C traceparent -- lets authz-service's own span be a
+            # CHILD of this one (same trace_id), not an unrelated trace.
+            # inject() writes into whatever dict-like carrier it's given
+            # using the process's configured propagator (W3C TraceContext
+            # by default), no manual header formatting needed.
+            inject(headers)
+            request = urllib.request.Request(
+                f"{self._base_url}/v1/authorize",
+                data=body,
+                headers=headers,
+                method="POST",
             )
-        return IamPrincipalGrant(
-            tenant_id=data["tenant_id"], application_id=data["application_id"], roles=list(data["roles"])
-        )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self._timeout_s, context=self._ssl_context
+                ) as resp:  # noqa: S310 (fixed internal URL, not user input)
+                    data = json.loads(resp.read())
+            except urllib.error.URLError as exc:
+                span.set_attribute("error", str(exc))
+                raise AuthError(
+                    f"authz-service unavailable: {exc}", code="AUTHORIZATION_SERVICE_UNAVAILABLE"
+                ) from exc
+
+            span.set_attribute("authz.decision", data["decision"])
+            if data["decision"] != "ALLOW":
+                raise AuthError(
+                    f"no tenant mapping for IAM principal '{principal_arn}'", code="UNKNOWN_IAM_PRINCIPAL"
+                )
+            return IamPrincipalGrant(
+                tenant_id=data["tenant_id"], application_id=data["application_id"], roles=list(data["roles"])
+            )
 
     def list_grants(self) -> Dict[str, IamPrincipalGrant]:
         import json

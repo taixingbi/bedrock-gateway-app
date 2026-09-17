@@ -409,6 +409,40 @@ class HttpIamTenantResolverTests(unittest.TestCase):
 
         self.assertIs(mock_urlopen.call_args.kwargs["context"], sentinel_context)
 
+    def test_injects_w3c_traceparent(self):
+        """Lets authz-service's own span be a child of this request's
+        trace instead of an unrelated one -- see aws.iam.py's use of
+        opentelemetry.propagate.inject()."""
+        import io
+        from unittest.mock import patch
+
+        from ..auth import aws_iam as aws_iam_module
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        class _Resp:
+            def __enter__(self_):
+                return io.BytesIO(
+                    b'{"decision":"ALLOW","tenant_id":"search","application_id":"search-dev",'
+                    b'"roles":[],"policy_id":"iam-principal-mapping-v1","reason":"principal is mapped"}'
+                )
+
+            def __exit__(self_, *args):
+                return False
+
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        with patch("urllib.request.urlopen", return_value=_Resp()) as mock_urlopen:
+            with patch.object(aws_iam_module, "inject") as mock_inject:
+                resolver.resolve("arn:aws:iam::123:role/x")
+
+        mock_inject.assert_called_once()
+        # inject() was handed the actual headers dict being built for
+        # this request (content-type already in it), not some
+        # unrelated/empty dict -- confirms it runs in the right place,
+        # before the request is sent.
+        (injected_carrier,), _ = mock_inject.call_args
+        self.assertIn("content-type", injected_carrier)
+
 
 if __name__ == "__main__":
     unittest.main()
