@@ -64,30 +64,36 @@ iam_principals:
 
   # Plan section 29's dedicated-tenant-account model -- tenant-a/tenant-b
   # each have their own AWS account (998116076808 / 199013204390) rather
-  # than living in this account like every principal above. NOT YET
-  # REACHABLE: no IAM role named tenant-a-client/tenant-b-client has
-  # actually been created in either account (creating one is an IAM
-  # permission grant, out of scope for this change), so a caller
-  # assuming these ARNs doesn't exist yet -- these entries just say what
-  # a role would need to be named for the mapping to work once one is
-  # created and granted execute-api:Invoke on the /iam/* route
-  # (see infra/README.md).
-  "arn:aws:iam::998116076808:role/tenant-a-client":
+  # than living in this account like every principal above, and are
+  # deliberately kept as separate tenant_ids from team-a (not merged) --
+  # team-a stays the shared-account demo tenant (this account, tiny
+  # smoke-test budget), tenant-a/tenant-b are the dedicated-account
+  # isolation demo, showing both tenancy models side by side. Role name
+  # is team-a-ai-client/team-b-ai-client -- same application identity
+  # convention as the shared-account team-a-ai-client role, just running
+  # from its own account instead of this one; tenant_id is what actually
+  # differs. NOT YET REACHABLE: no such IAM role has actually been
+  # created in either account yet (creating one is an IAM permission
+  # grant, out of scope for this change), so a caller assuming these
+  # ARNs doesn't exist yet -- these entries just say what a role would
+  # need to be named for the mapping to work once one is created and
+  # granted execute-api:Invoke on the /iam/* route (see infra/README.md).
+  "arn:aws:iam::998116076808:role/team-a-ai-client":
     tenant_id: tenant-a
-    application_id: tenant-a-client
+    application_id: team-a-ai-client
     roles: [developer]
 
-  "arn:aws:sts::998116076808:assumed-role/tenant-a-client/*":
+  "arn:aws:sts::998116076808:assumed-role/team-a-ai-client/*":
     tenant_id: tenant-a
-    application_id: tenant-a-client
+    application_id: team-a-ai-client
     roles: [developer]
 
-  "arn:aws:iam::199013204390:role/tenant-b-client":
+  "arn:aws:iam::199013204390:role/team-b-ai-client":
     tenant_id: tenant-b
-    application_id: tenant-b-client
+    application_id: team-b-ai-client
     roles: [developer]
 
-  "arn:aws:sts::199013204390:assumed-role/tenant-b-client/*":
+  "arn:aws:sts::199013204390:assumed-role/team-b-ai-client/*":
     tenant_id: tenant-b
-    application_id: tenant-b-client
+    application_id: team-b-ai-client
     roles: [developer]

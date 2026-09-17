@@ -81,12 +81,16 @@ tenants:
 
   # Plan section 29's dedicated-tenant-account model: tenant-a/tenant-b
   # each have their own AWS account (998116076808 / 199013204390,
-  # created 2026-09-17 -- see plan.md section 29), distinct from
-  # team-a/finance/search/sandbox above, which all live in the shared
-  # management account. Like team-a, callers come in via AWS_IAM/SigV4
-  # (see iam_tenants.yaml) rather than a JWT. No monthly_budget set
-  # (unlimited) -- these aren't demonstrating budget enforcement, that's
-  # already covered by team-a's deliberately tiny one.
+  # created 2026-09-17 -- see plan.md section 29). Deliberately kept as
+  # separate tenant_ids from team-a, not merged with it, even though
+  # both use AWS_IAM/SigV4 -- this platform demonstrates two tenancy
+  # models side by side on purpose:
+  #   team-a              -- shared-account multi-tenancy (this account,
+  #                          tiny smoke-test budget, demos BUDGET_EXCEEDED)
+  #   tenant-a / tenant-b -- dedicated-account isolation (their own AWS
+  #                          accounts; no monthly_budget set here since
+  #                          budget enforcement is already covered by
+  #                          team-a, not what these are demonstrating)
   #
   # NOT YET REACHABLE: no IAM role exists in either AWS account yet, no
   # cross-account trust, and no execute-api:Invoke resource policy on
