@@ -39,7 +39,16 @@ def configure_tracing(service_name: str, *, otlp_endpoint: Optional[str] = None)
 
             exporter: Any = OTLPSpanExporter(endpoint=otlp_endpoint)
         else:
-            exporter = ConsoleSpanExporter()
+            # Default formatter pretty-prints each span across ~30 lines
+            # (ReadableSpan.to_json()'s indent=4 default) -- harmless to
+            # a human reading stdout directly, but the awslogs driver
+            # ships stdout to CloudWatch one line at a time, so a single
+            # span becomes ~30 separate, individually-useless log
+            # events, drowning out the real structured JSON lines
+            # (telemetry/logging.py) in between. indent=None keeps this
+            # exporter (no new backend/dependency) but as one compact
+            # line per span, like every other log line already is.
+            exporter = ConsoleSpanExporter(formatter=lambda span: span.to_json(indent=None) + "\n")
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
         _configured = True
