@@ -10,7 +10,11 @@ for that request.
 session_id works the same way except it's never invented when absent
 (read from `X-Session-Id`, empty if the caller didn't send one) -- a
 random session_id wouldn't actually group anything, unlike request_id
-where any unique value is useful.
+where any unique value is useful. api_gateway_request_id is the same
+idea again, but read from `Apigw-Requestid` (a header API Gateway
+itself adds to every integration request, not something a client
+sets) -- the join key back to platform-api-gateway's own access log
+(see telemetry/logging.py's module docstring for the full picture).
 
 This middleware also opens the OUTER span for the whole request
 (everything downstream, including route handlers' own child spans,
@@ -36,7 +40,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
-from .logging import get_logger, log_event, session_id_ctx
+from .logging import api_gateway_request_id_ctx, get_logger, log_event, session_id_ctx
 
 _request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "gateway_request_id", default="-"
@@ -54,8 +58,17 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         session_id = request.headers.get("x-session-id") or ""
+        # API Gateway adds this to every integration request it forwards
+        # (not a header any client sets) -- the same value platform-api-
+        # gateway's own access log calls api_gateway_request_id, so the
+        # two logs can be joined on it. Not independently verified live
+        # yet (unlike the rest of this file) -- if this header turns out
+        # to be spelled/behave differently than expected, the field
+        # simply never appears; nothing else depends on it.
+        api_gateway_request_id = request.headers.get("apigw-requestid") or ""
         request_token = _request_id_ctx.set(request_id)
         session_token = session_id_ctx.set(session_id)
+        api_gateway_request_id_token = api_gateway_request_id_ctx.set(api_gateway_request_id)
         request.state.request_id = request_id
         request.state.session_id = session_id
 
@@ -75,6 +88,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                     request_span.set_attribute("http.target", request.url.path)
                     if session_id:
                         request_span.set_attribute("session_id", session_id)
+                    if api_gateway_request_id:
+                        request_span.set_attribute("api_gateway_request_id", api_gateway_request_id)
 
                 try:
                     response = await call_next(request)
@@ -104,6 +119,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         finally:
             _request_id_ctx.reset(request_token)
             session_id_ctx.reset(session_token)
+            api_gateway_request_id_ctx.reset(api_gateway_request_id_token)
             try:
                 response.headers["x-request-id"] = request_id
                 if session_id:

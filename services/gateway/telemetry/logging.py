@@ -4,8 +4,8 @@ Field order is fixed and intentional (mirrors the convention already used
 for the vLLM gateway's `layer-gateway-llm-inference-v1` structured logs):
 
     ts -> level -> service -> environment -> logger -> request_id
-    -> trace_id -> span_id -> session_id -> <event-specific fields>
-    -> message -> error
+    -> trace_id -> span_id -> session_id -> api_gateway_request_id
+    -> <event-specific fields> -> message -> error
 
 `service`/`environment` are fixed per-process (e.g. "gateway-api"/"dev"),
 never per-request -- they exist so a log aggregated across every
@@ -18,11 +18,21 @@ platform-api-gateway's access log format.
 `trace_id`/`span_id` are pulled automatically from whatever OTel span is
 current when the log call happens (telemetry/otel.py) -- omitted
 entirely when there is none (an invalid/no-op span context), never
-fabricated. `session_id` comes from `_session_id_ctx`, set by
+fabricated. `session_id` comes from `session_id_ctx`, set by
 telemetry/middleware.py from the inbound `x-session-id` header (empty
 when the caller didn't send one) -- unlike request_id, no session_id
 is invented when absent, since a made-up one wouldn't actually group
-anything. Both are ContextVars rather than explicit log_event()
+anything. `api_gateway_request_id` comes from `api_gateway_request_id_ctx`,
+set from the inbound `Apigw-Requestid` header -- API Gateway adds this
+automatically to every integration request it forwards (distinct from
+any custom header), carrying the SAME value platform-api-gateway's own
+access log calls `api_gateway_request_id` (renamed from the AWS
+default `requestId` for exactly this reason), so the two logs can be
+joined on it even though that access log can carry none of the other
+IDs here (see platform-api-gateway's own module comment -- API Gateway
+access logs can't read arbitrary request headers at all). Absent
+entirely for calls that never went through API Gateway (e.g. local
+dev). All three are ContextVars rather than explicit log_event()
 arguments so every call site gets them for free, the same way every
 call site already gets `service`/`environment` for free.
 
@@ -52,6 +62,13 @@ _RESERVED_LOGRECORD_KEYS = {
 # inbound x-session-id header; read here so every log line picks it up
 # without each call site having to pass it explicitly.
 session_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("gateway_session_id", default="")
+
+# Same idea, from the inbound Apigw-Requestid header (API Gateway adds
+# this to every integration request automatically -- see module
+# docstring).
+api_gateway_request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "gateway_api_gateway_request_id", default=""
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -88,6 +105,10 @@ class JsonFormatter(logging.Formatter):
         session_id = session_id_ctx.get()
         if session_id:
             ordered["session_id"] = session_id
+
+        api_gateway_request_id = api_gateway_request_id_ctx.get()
+        if api_gateway_request_id:
+            ordered["api_gateway_request_id"] = api_gateway_request_id
 
         ordered.update(extra)
         ordered["message"] = record.getMessage()

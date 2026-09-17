@@ -234,6 +234,34 @@ class JsonFormatterTraceAndSessionFieldsTests(unittest.TestCase):
 
         self.assertNotIn("session_id", line)
 
+    def test_api_gateway_request_id_present_when_set(self):
+        from ..telemetry.logging import api_gateway_request_id_ctx
+
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        token = api_gateway_request_id_ctx.set("D2J6PgnnoAMESRg=")
+        try:
+            line = json.loads(formatter.format(record))
+        finally:
+            api_gateway_request_id_ctx.reset(token)
+
+        self.assertEqual(line["api_gateway_request_id"], "D2J6PgnnoAMESRg=")
+
+    def test_api_gateway_request_id_absent_when_not_set(self):
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        line = json.loads(formatter.format(record))
+
+        self.assertNotIn("api_gateway_request_id", line)
+
 
 class PiiSafeLoggingTests(unittest.TestCase):
     def test_operational_logs_never_contain_raw_message_content(self):
