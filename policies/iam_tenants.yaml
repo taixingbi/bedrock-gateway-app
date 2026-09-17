@@ -61,3 +61,33 @@ iam_principals:
     tenant_id: finance
     application_id: finance-manual-smoke-test
     roles: [developer]
+
+  # Plan section 29's dedicated-tenant-account model -- tenant-a/tenant-b
+  # each have their own AWS account (998116076808 / 199013204390) rather
+  # than living in this account like every principal above. NOT YET
+  # REACHABLE: no IAM role named tenant-a-client/tenant-b-client has
+  # actually been created in either account (creating one is an IAM
+  # permission grant, out of scope for this change), so a caller
+  # assuming these ARNs doesn't exist yet -- these entries just say what
+  # a role would need to be named for the mapping to work once one is
+  # created and granted execute-api:Invoke on the /iam/* route
+  # (see infra/README.md).
+  "arn:aws:iam::998116076808:role/tenant-a-client":
+    tenant_id: tenant-a
+    application_id: tenant-a-client
+    roles: [developer]
+
+  "arn:aws:sts::998116076808:assumed-role/tenant-a-client/*":
+    tenant_id: tenant-a
+    application_id: tenant-a-client
+    roles: [developer]
+
+  "arn:aws:iam::199013204390:role/tenant-b-client":
+    tenant_id: tenant-b
+    application_id: tenant-b-client
+    roles: [developer]
+
+  "arn:aws:sts::199013204390:assumed-role/tenant-b-client/*":
+    tenant_id: tenant-b
+    application_id: tenant-b-client
+    roles: [developer]

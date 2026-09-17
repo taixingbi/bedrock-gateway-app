@@ -78,3 +78,33 @@ tenants:
     # single real chat/job call exhausts it, so BUDGET_EXCEEDED can be
     # demonstrated live with one extra curl rather than thousands.
     monthly_budget: 0.000002
+
+  # Plan section 29's dedicated-tenant-account model: tenant-a/tenant-b
+  # each have their own AWS account (998116076808 / 199013204390,
+  # created 2026-09-17 -- see plan.md section 29), distinct from
+  # team-a/finance/search/sandbox above, which all live in the shared
+  # management account. Like team-a, callers come in via AWS_IAM/SigV4
+  # (see iam_tenants.yaml) rather than a JWT. No monthly_budget set
+  # (unlimited) -- these aren't demonstrating budget enforcement, that's
+  # already covered by team-a's deliberately tiny one.
+  #
+  # NOT YET REACHABLE: no IAM role exists in either AWS account yet, no
+  # cross-account trust, and no execute-api:Invoke resource policy on
+  # the /iam/* route grants either account access -- see iam_tenants.yaml's
+  # entries for the exact ARNs a role would need. A caller cannot
+  # actually use this path yet; the tenant_id/policy exists so the rest
+  # of the provisioning (IAM role, trust policy, API Gateway resource
+  # policy) has something to point at once that's done.
+  tenant-a:
+    state: ACTIVE
+    models: []   # no restriction beyond the gateway default model
+    rpm_limit: 60
+    guardrail_policy: standard-v1
+    policy_epoch: 1
+
+  tenant-b:
+    state: ACTIVE
+    models: []   # no restriction beyond the gateway default model
+    rpm_limit: 60
+    guardrail_policy: standard-v1
+    policy_epoch: 1
