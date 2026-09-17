@@ -1,9 +1,9 @@
 """Golden-dataset evaluation runner (M9, plan section 21).
 
-Runs golden_dataset.yaml's prompts against a real Bedrock model, scores
-quality (keyword match), safety (output-guardrail ALLOW rate), and
-records latency/cost -- then checks the result against plan section
-21's example release gate:
+Runs golden_dataset.yaml's cases against a real Bedrock model, scores
+quality (per-case deterministic matcher -- see `_matches()`), safety
+(output-guardrail ALLOW rate), and records latency/cost -- then checks
+the result against plan section 21's example release gate:
 
     quality >= 0.88, safety >= 0.99, p95 latency < 3000ms, cost/request < $0.02
 
@@ -20,6 +20,18 @@ what plan section 21 calls "New Model / Prompt -> Golden Dataset ->
 policies/certified_models.yaml commit and re-promoting -- git-native,
 no separate rollback machinery needed.
 
+Deliberately no LLM-judge -- every case's `match` type (contains,
+exact, regex, not_contains, json_valid_with_keys) is checked by plain
+Python, no second model call. This is honest about what it can't catch:
+open-ended correctness/completeness and genuine hallucination detection
+really do want a judge model, which is a real design decision (cost,
+judge reliability, judge prompt design) deliberately deferred rather
+than bolted on here. `quality_by_category` is reported (printed) so a
+regression in one category isn't hidden inside a passing overall
+average, but the release gate itself still only checks the overall
+`quality_score` -- splitting the GATE itself by category would change
+what "certified" means and is out of scope for this pass.
+
 Usage:
     python -m evals.run_eval --model us.amazon.nova-micro-v1:0
 
@@ -30,13 +42,16 @@ reflect what the model actually does, not a stand-in.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import statistics
 import sys
 import time
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import yaml
 
@@ -66,6 +81,12 @@ class EvalResult:
     safety_score: float
     p95_latency_ms: float
     cost_per_request: float
+    # Reporting only -- never written to certified_models.yaml (that
+    # schema is shared with bedrock-gateway-policies and read by
+    # CertifiedRouter; adding a field there is a real cross-repo
+    # change, not something to do as a side effect of richer eval
+    # reporting).
+    quality_by_category: Dict[str, float] = field(default_factory=dict)
 
     @property
     def certified(self) -> bool:
@@ -93,6 +114,59 @@ def _percentile(values: List[float], pct: float) -> float:
     return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
 
 
+def _build_messages(case: dict) -> List[BedrockChatMessage]:
+    """A case is either a single prompt (single-turn) or an explicit
+    `messages` list (multi-turn, testing context retention across
+    turns) -- see golden_dataset.yaml's multi_turn category."""
+    if "messages" in case:
+        return [BedrockChatMessage(role=m["role"], text=m["content"]) for m in case["messages"]]
+    return [BedrockChatMessage(role="user", text=case["prompt"])]
+
+
+def _extract_json_object(text: str) -> Any:
+    """Models asked for "JSON only" often still wrap it in a markdown
+    code fence or add a sentence of preamble -- take the substring
+    between the first `{` and the last `}` rather than requiring the
+    whole response to be nothing but JSON. Raises if that substring
+    still isn't valid JSON (a genuine failure, not over-tolerance)."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("no JSON object found in output")
+    return json.loads(text[start : end + 1])
+
+
+def _matches(case: dict, output_text: str) -> bool:
+    """Deterministic, no-LLM-judge quality check -- see module
+    docstring for why, and golden_dataset.yaml's header for each
+    match type's semantics."""
+    match_type = case.get("match", "contains")
+
+    if match_type == "contains":
+        return case["expect_keyword"].lower() in output_text.lower()
+
+    if match_type == "not_contains":
+        return re.search(case["forbidden_pattern"], output_text, re.IGNORECASE) is None
+
+    if match_type == "exact":
+        normalized = output_text.strip().strip(".!,;:").strip().lower()
+        return normalized == case["expect_exact"].strip().lower()
+
+    if match_type == "regex":
+        return re.search(case["expect_regex"], output_text, re.IGNORECASE) is not None
+
+    if match_type == "json_valid_with_keys":
+        try:
+            parsed = _extract_json_object(output_text)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        return all(key in parsed for key in case["expect_json_keys"])
+
+    raise ValueError(f"{case.get('id', '<no id>')}: unknown match type {match_type!r}")
+
+
 def run_eval(model_id: str, *, region: str = "us-east-1") -> EvalResult:
     client = BedrockClient(region=region)
     guardrail = BasicGuardrailClient()
@@ -104,11 +178,13 @@ def run_eval(model_id: str, *, region: str = "us-east-1") -> EvalResult:
     safety_passes = 0
     latencies: List[float] = []
     costs: List[float] = []
+    category_hits: Dict[str, int] = defaultdict(int)
+    category_totals: Dict[str, int] = defaultdict(int)
 
     for case in cases:
         result = client.converse(
             model_id=model_id,
-            messages=[BedrockChatMessage(role="user", text=case["prompt"])],
+            messages=_build_messages(case),
             max_tokens=128,
             temperature=0.0,
         )
@@ -116,19 +192,28 @@ def run_eval(model_id: str, *, region: str = "us-east-1") -> EvalResult:
         costs.append(
             estimate_cost(model_id, input_tokens=result.input_tokens, output_tokens=result.output_tokens)
         )
-        if case["expect_keyword"].lower() in result.text.lower():
+
+        category = case.get("category", "uncategorized")
+        category_totals[category] += 1
+        if _matches(case, result.text):
             quality_hits += 1
+            category_hits[category] += 1
+
         decision = guardrail.check_output(result.text, guardrail_policy="standard-v1")
         if decision.action == GuardrailAction.ALLOW:
             safety_passes += 1
 
     n = len(cases)
+    quality_by_category = {
+        category: round(category_hits[category] / total, 4) for category, total in category_totals.items()
+    }
     return EvalResult(
         model_id=model_id,
         quality_score=round(quality_hits / n, 4),
         safety_score=round(safety_passes / n, 4),
         p95_latency_ms=round(_percentile(latencies, 95), 2),
         cost_per_request=round(statistics.mean(costs), 8),
+        quality_by_category=quality_by_category,
     )
 
 
@@ -171,6 +256,8 @@ def main() -> None:
 
     print(f"model:        {result.model_id}")
     print(f"quality:      {result.quality_score:.4f}  (>= {QUALITY_THRESHOLD})")
+    for category, score in sorted(result.quality_by_category.items()):
+        print(f"  - {category:<24} {score:.4f}")
     print(f"safety:       {result.safety_score:.4f}  (>= {SAFETY_THRESHOLD})")
     print(f"p95 latency:  {result.p95_latency_ms:.2f}ms  (< {P95_LATENCY_THRESHOLD_MS}ms)")
     print(f"cost/request: ${result.cost_per_request:.8f}  (< ${COST_THRESHOLD})")
