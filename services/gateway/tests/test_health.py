@@ -27,6 +27,26 @@ class HealthzTests(unittest.TestCase):
         resp = self.client.get("/healthz")
         self.assertIn("x-request-id", resp.headers)
 
+    def test_successful_healthz_is_not_logged(self):
+        """Polled every 10-15s by the ALB and the container's own Docker
+        HEALTHCHECK, forever -- logging every 200 would drown out real
+        request logs for no benefit (see telemetry/middleware.py)."""
+        import logging
+
+        logger = logging.getLogger("gateway.access")
+        with self.assertRaises(AssertionError):
+            with self.assertLogs(logger, level="INFO"):
+                self.client.get("/healthz")
+
+    def test_non_healthz_requests_are_still_logged(self):
+        """The suppression is scoped to exactly path == "/healthz" and
+        status == 200 -- everything else (including a 401 on a real
+        route) is unaffected."""
+        with self.assertLogs("gateway.access", level="INFO") as cm:
+            self.client.post("/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(len(cm.records), 1)
+        self.assertEqual(cm.records[0].path, "/v1/chat")
+
 
 if __name__ == "__main__":
     unittest.main()

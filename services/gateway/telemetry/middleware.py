@@ -44,16 +44,22 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
-            log_event(
-                _access_logger,
-                "INFO",
-                "request completed",
-                request_id=request_id,
-                method=request.method,
-                path=request.url.path,
-                status=status_code,
-                duration_ms=duration_ms,
-            )
+            # /healthz is polled every 10-15s by the ALB target group and
+            # the container's own Docker HEALTHCHECK, forever -- logging
+            # every successful ping drowns out real request logs for no
+            # benefit. A *failing* health check is still logged; that's
+            # the one case worth knowing about.
+            if request.url.path != "/healthz" or status_code != 200:
+                log_event(
+                    _access_logger,
+                    "INFO",
+                    "request completed",
+                    request_id=request_id,
+                    method=request.method,
+                    path=request.url.path,
+                    status=status_code,
+                    duration_ms=duration_ms,
+                )
             _request_id_ctx.reset(token)
             try:
                 response.headers["x-request-id"] = request_id
