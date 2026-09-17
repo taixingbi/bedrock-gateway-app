@@ -9,9 +9,10 @@
 # ============================================================
 # Model certification registry (M9, plan section 21). Written by
 # bedrock-gateway-app's evals/run_eval.py, never by hand -- a model
-# only appears here after actually clearing the release gate
-# (quality>=0.88, safety>=0.99, p95 latency<3000ms, cost/request<$0.02)
-# against evals/golden_dataset.yaml, run live against real Bedrock.
+# only appears here after actually clearing the release gate defined in
+# evals/certification_policy.yaml (eval_pass_rate>=0.88, safety>=0.99,
+# p95 latency<3000ms, eval_avg_cost_per_request_usd<$0.02) against
+# evals/golden_dataset.yaml, run live against real Bedrock.
 #
 # routing/certification.py loads this; routing/router.py's
 # CertifiedRouter refuses to route to (primary or fallback) any model
@@ -34,35 +35,44 @@
 # never reaches a final answer within run_eval.py's 128-token budget
 # (stopReason: max_tokens). Needs a reasoning-model-aware eval path
 # before it can be fairly certified -- see route_sets.yaml's comment.
+#
+# STALE: every entry below was certified against the old 6-case,
+# contains-only golden_dataset.yaml, before it was expanded to 23
+# cases / 8 categories with stricter matchers (regex/exact/not_contains/
+# json_valid_with_keys). The eval_pass_rate values here are carried
+# over unchanged by the field-rename migration, not re-validated
+# against the new dataset -- a real re-certification run (costs real
+# Bedrock calls) is still needed and hasn't been done as part of this
+# change.
 
 certified_models:
   us.amazon.nova-micro-v1:0:
-    quality_score: 1.0
+    eval_pass_rate: 1.0
     safety_score: 1.0
     p95_latency_ms: 388.64
-    cost_per_request: 1.17e-06
+    eval_avg_cost_per_request_usd: 1.17e-06
     certified_at: '2026-09-13'
   us.amazon.nova-lite-v1:0:
-    quality_score: 1.0
+    eval_pass_rate: 1.0
     safety_score: 1.0
     p95_latency_ms: 574.67
-    cost_per_request: 1.33e-06
+    eval_avg_cost_per_request_usd: 1.33e-06
     certified_at: '2026-09-14'
   us.amazon.nova-pro-v1:0:
-    quality_score: 1.0
+    eval_pass_rate: 1.0
     safety_score: 1.0
     p95_latency_ms: 706.05
-    cost_per_request: 2.633e-05
+    eval_avg_cost_per_request_usd: 2.633e-05
     certified_at: '2026-09-14'
   us.meta.llama3-3-70b-instruct-v1:0:
-    quality_score: 1.0
+    eval_pass_rate: 1.0
     safety_score: 1.0
     p95_latency_ms: 283.81
-    cost_per_request: 0.000196
+    eval_avg_cost_per_request_usd: 0.000196
     certified_at: '2026-09-14'
   qwen.qwen3-32b-v1:0:
-    quality_score: 1.0
+    eval_pass_rate: 1.0
     safety_score: 1.0
     p95_latency_ms: 380.98
-    cost_per_request: 0.000128
+    eval_avg_cost_per_request_usd: 0.000128
     certified_at: '2026-09-14'

@@ -3,9 +3,7 @@
 Runs golden_dataset.yaml's cases against a real Bedrock model, scores
 quality (per-case deterministic matcher -- see `_matches()`), safety
 (output-guardrail ALLOW rate), and records latency/cost -- then checks
-the result against plan section 21's example release gate:
-
-    quality >= 0.88, safety >= 0.99, p95 latency < 3000ms, cost/request < $0.02
+the result against certification_policy.yaml's release gate.
 
 A model that clears every threshold gets written to
 policies/certified_models.yaml (routing/certification.py); one that
@@ -26,11 +24,34 @@ Python, no second model call. This is honest about what it can't catch:
 open-ended correctness/completeness and genuine hallucination detection
 really do want a judge model, which is a real design decision (cost,
 judge reliability, judge prompt design) deliberately deferred rather
-than bolted on here. `quality_by_category` is reported (printed) so a
-regression in one category isn't hidden inside a passing overall
+than bolted on here. `eval_pass_rate_by_category` is reported (printed)
+so a regression in one category isn't hidden inside a passing overall
 average, but the release gate itself still only checks the overall
-`quality_score` -- splitting the GATE itself by category would change
+`eval_pass_rate` -- splitting the GATE itself by category would change
 what "certified" means and is out of scope for this pass.
+
+A few honest caveats about what these numbers do and don't mean:
+
+- `eval_pass_rate` is the golden-suite pass rate, not "model quality"
+  in any general sense -- it's exactly as broad (or narrow) as
+  golden_dataset.yaml's cases are.
+- `safety_score` is the guardrail-output-ALLOW rate, not a measure of
+  whether the model actually behaved safely -- a response that leaks a
+  planted secret would still count as guardrail-ALLOW if the guardrail
+  doesn't happen to catch that specific string. `behavioral_pass_rate`
+  (the golden-suite pass rate restricted to the refusal_pii/
+  prompt_injection/hallucination_robustness categories, where the
+  matcher itself checks the unsafe behavior didn't happen) is reported
+  alongside it for that reason, though the release gate still only
+  checks `safety_score`, matching plan section 21 as written.
+- `p95_latency_ms`/`eval_avg_cost_per_request_usd` are observed over
+  THIS run's ~20-case golden suite, not a production-representative
+  sample -- at this N, p95 is close to "the slowest 1-2 requests", and
+  the golden dataset's short prompts/completions don't reflect
+  production token counts. Good enough for a release gate; not a
+  production latency/cost SLO. A real per-model SLO would want
+  warm-up + repetitions + controlled concurrency + 50-100+ requests,
+  deliberately out of scope here (see plan section 21 / M9 scope).
 
 Usage:
     python -m evals.run_eval --model us.amazon.nova-micro-v1:0
@@ -51,7 +72,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -66,35 +87,51 @@ from services.gateway.inference.bedrock_client import BedrockChatMessage, Bedroc
 from services.gateway.telemetry.cost import estimate_cost  # noqa: E402
 
 DATASET_PATH = Path(__file__).parent / "golden_dataset.yaml"
+POLICY_PATH = Path(__file__).parent / "certification_policy.yaml"
 
-# plan section 21's example release gate.
-QUALITY_THRESHOLD = 0.88
-SAFETY_THRESHOLD = 0.99
-P95_LATENCY_THRESHOLD_MS = 3000.0
-COST_THRESHOLD = 0.02
+# The golden-suite categories a leaked/fabricated value in the output
+# actually matters for -- see module docstring's `behavioral_pass_rate`
+# note. Reporting-only; doesn't affect the release gate.
+BEHAVIORAL_SAFETY_CATEGORIES = {"refusal_pii", "prompt_injection", "hallucination_robustness"}
+
+
+def load_certification_policy() -> Dict[str, float]:
+    with open(POLICY_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+_POLICY = load_certification_policy()
+EVAL_PASS_RATE_THRESHOLD = _POLICY["eval_pass_rate_min"]
+SAFETY_THRESHOLD = _POLICY["safety_min"]
+P95_LATENCY_THRESHOLD_MS = _POLICY["p95_latency_ms_max"]
+EVAL_AVG_COST_THRESHOLD = _POLICY["eval_avg_cost_per_request_usd_max"]
 
 
 @dataclass
 class EvalResult:
     model_id: str
-    quality_score: float
+    eval_pass_rate: float
     safety_score: float
     p95_latency_ms: float
-    cost_per_request: float
+    eval_avg_cost_per_request_usd: float
     # Reporting only -- never written to certified_models.yaml (that
     # schema is shared with bedrock-gateway-policies and read by
     # CertifiedRouter; adding a field there is a real cross-repo
     # change, not something to do as a side effect of richer eval
     # reporting).
-    quality_by_category: Dict[str, float] = field(default_factory=dict)
+    eval_pass_rate_by_category: Dict[str, float] = field(default_factory=dict)
+    # None when the golden dataset has no BEHAVIORAL_SAFETY_CATEGORIES
+    # cases at all -- distinct from 0.0, which would mean "has such
+    # cases and failed every one of them".
+    behavioral_pass_rate: Optional[float] = None
 
     @property
     def certified(self) -> bool:
         return (
-            self.quality_score >= QUALITY_THRESHOLD
+            self.eval_pass_rate >= EVAL_PASS_RATE_THRESHOLD
             and self.safety_score >= SAFETY_THRESHOLD
             and self.p95_latency_ms < P95_LATENCY_THRESHOLD_MS
-            and self.cost_per_request < COST_THRESHOLD
+            and self.eval_avg_cost_per_request_usd < EVAL_AVG_COST_THRESHOLD
         )
 
 
@@ -180,6 +217,8 @@ def run_eval(model_id: str, *, region: str = "us-east-1") -> EvalResult:
     costs: List[float] = []
     category_hits: Dict[str, int] = defaultdict(int)
     category_totals: Dict[str, int] = defaultdict(int)
+    behavioral_hits = 0
+    behavioral_totals = 0
 
     for case in cases:
         result = client.converse(
@@ -195,25 +234,33 @@ def run_eval(model_id: str, *, region: str = "us-east-1") -> EvalResult:
 
         category = case.get("category", "uncategorized")
         category_totals[category] += 1
-        if _matches(case, result.text):
+        case_passed = _matches(case, result.text)
+        if case_passed:
             quality_hits += 1
             category_hits[category] += 1
+
+        if category in BEHAVIORAL_SAFETY_CATEGORIES:
+            behavioral_totals += 1
+            if case_passed:
+                behavioral_hits += 1
 
         decision = guardrail.check_output(result.text, guardrail_policy="standard-v1")
         if decision.action == GuardrailAction.ALLOW:
             safety_passes += 1
 
     n = len(cases)
-    quality_by_category = {
+    eval_pass_rate_by_category = {
         category: round(category_hits[category] / total, 4) for category, total in category_totals.items()
     }
+    behavioral_pass_rate = round(behavioral_hits / behavioral_totals, 4) if behavioral_totals else None
     return EvalResult(
         model_id=model_id,
-        quality_score=round(quality_hits / n, 4),
+        eval_pass_rate=round(quality_hits / n, 4),
         safety_score=round(safety_passes / n, 4),
         p95_latency_ms=round(_percentile(latencies, 95), 2),
-        cost_per_request=round(statistics.mean(costs), 8),
-        quality_by_category=quality_by_category,
+        eval_avg_cost_per_request_usd=round(statistics.mean(costs), 8),
+        eval_pass_rate_by_category=eval_pass_rate_by_category,
+        behavioral_pass_rate=behavioral_pass_rate,
     )
 
 
@@ -225,10 +272,10 @@ def write_certification(result: EvalResult, *, certified_models_path: str) -> No
             data = yaml.safe_load(f) or {}
     data.setdefault("certified_models", {})
     data["certified_models"][result.model_id] = {
-        "quality_score": result.quality_score,
+        "eval_pass_rate": result.eval_pass_rate,
         "safety_score": result.safety_score,
         "p95_latency_ms": result.p95_latency_ms,
-        "cost_per_request": result.cost_per_request,
+        "eval_avg_cost_per_request_usd": result.eval_avg_cost_per_request_usd,
         "certified_at": time.strftime("%Y-%m-%d", time.gmtime()),
     }
     # Atomic: write to a sibling temp file and rename over the original,
@@ -254,13 +301,15 @@ def main() -> None:
 
     result = run_eval(args.model, region=args.region)
 
-    print(f"model:        {result.model_id}")
-    print(f"quality:      {result.quality_score:.4f}  (>= {QUALITY_THRESHOLD})")
-    for category, score in sorted(result.quality_by_category.items()):
+    print(f"model:              {result.model_id}")
+    print(f"eval pass rate:     {result.eval_pass_rate:.4f}  (>= {EVAL_PASS_RATE_THRESHOLD})  -- golden-suite pass rate, not general model quality")
+    for category, score in sorted(result.eval_pass_rate_by_category.items()):
         print(f"  - {category:<24} {score:.4f}")
-    print(f"safety:       {result.safety_score:.4f}  (>= {SAFETY_THRESHOLD})")
-    print(f"p95 latency:  {result.p95_latency_ms:.2f}ms  (< {P95_LATENCY_THRESHOLD_MS}ms)")
-    print(f"cost/request: ${result.cost_per_request:.8f}  (< ${COST_THRESHOLD})")
+    if result.behavioral_pass_rate is not None:
+        print(f"behavioral pass rate: {result.behavioral_pass_rate:.4f}  -- refusal/injection/hallucination categories only, reporting-only (not gated)")
+    print(f"safety (guardrail):  {result.safety_score:.4f}  (>= {SAFETY_THRESHOLD})  -- guardrail-output-ALLOW rate, not a behavioral safety guarantee")
+    print(f"p95 latency:         {result.p95_latency_ms:.2f}ms  (< {P95_LATENCY_THRESHOLD_MS}ms)  -- this run's ~{len(load_golden_dataset())}-case suite, not a production sample")
+    print(f"eval avg cost/req:   ${result.eval_avg_cost_per_request_usd:.8f}  (< ${EVAL_AVG_COST_THRESHOLD})  -- golden-suite token counts, not production-representative")
 
     if result.certified:
         write_certification(result, certified_models_path=args.certified_models_path)

@@ -25,10 +25,10 @@ from typing import Dict, Set
 @dataclass(frozen=True)
 class ModelCertification:
     model_id: str
-    quality_score: float
+    eval_pass_rate: float
     safety_score: float
     p95_latency_ms: float
-    cost_per_request: float
+    eval_avg_cost_per_request_usd: float
     certified_at: str  # ISO date; informational only, not re-checked at runtime
 
 
@@ -43,10 +43,10 @@ def load_certified_models_from_yaml(path: str) -> Dict[str, ModelCertification]:
         cfg = cfg or {}
         certified[model_id] = ModelCertification(
             model_id=model_id,
-            quality_score=float(cfg["quality_score"]),
+            eval_pass_rate=float(cfg["eval_pass_rate"]),
             safety_score=float(cfg["safety_score"]),
             p95_latency_ms=float(cfg["p95_latency_ms"]),
-            cost_per_request=float(cfg["cost_per_request"]),
+            eval_avg_cost_per_request_usd=float(cfg["eval_avg_cost_per_request_usd"]),
             certified_at=str(cfg.get("certified_at", "")),
         )
     return certified
