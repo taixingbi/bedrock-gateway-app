@@ -50,6 +50,12 @@ class TenantPolicy:
     # M5: opt-in only -- see telemetry/debug_capture.py. False by default
     # means raw prompt/response content is never captured anywhere.
     debug_capture_enabled: bool = False
+    # Documented, not yet enforced: telemetry/debug_capture.py's
+    # S3AuditStore writes every captured payload under one uniform
+    # bucket-wide lifecycle expiration today, not a per-tenant one --
+    # this field is stored per-object for a future per-tenant lifecycle
+    # rule, but nothing currently deletes an object early because of it.
+    debug_capture_retention_days: Optional[int] = None
     # M8: hard limit on estimated spend per calendar month (see
     # usage/store.py). None means unlimited -- most tenants don't need
     # one for a V1 MVP; budget enforcement is opt-in per tenant.

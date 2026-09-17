@@ -80,6 +80,10 @@ class Settings:
     # M5 observability
     otel_exporter_otlp_endpoint: str
     debug_capture_ttl_s: float
+    # S3-backed audit store (telemetry/debug_capture.py's S3AuditStore) --
+    # empty means disabled, same "empty string = off" convention as
+    # jobs_queue_url/jobs_table_name below.
+    audit_bucket_name: str
 
     # M7 async jobs -- both empty by default (in-memory JobStore/JobQueue
     # instead of the real DynamoDB/SQS-backed ones, see main.py). Set in
@@ -156,6 +160,7 @@ def load_settings() -> Settings:
         circuit_breaker_reset_timeout_s=_env_float("CIRCUIT_BREAKER_RESET_TIMEOUT_S", 30.0),
         otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         debug_capture_ttl_s=_env_float("DEBUG_CAPTURE_TTL_S", 900.0),
+        audit_bucket_name=os.environ.get("AUDIT_BUCKET_NAME", ""),
         jobs_queue_url=os.environ.get("JOBS_QUEUE_URL", ""),
         jobs_table_name=os.environ.get("JOBS_TABLE_NAME", ""),
         usage_table_name=os.environ.get("USAGE_TABLE_NAME", ""),

@@ -55,7 +55,7 @@ from .routing.certification import certified_model_ids as _certified_model_ids_f
 from .routing.certification import load_certified_models_from_yaml
 from .routing.circuit_breaker import CircuitBreaker
 from .routing.router import CertifiedRouter, RouteSet, load_route_sets_from_yaml
-from .telemetry.debug_capture import DebugCaptureStore
+from .telemetry.debug_capture import DebugCaptureStore, S3AuditStore
 from .telemetry.logging import configure_logging, get_logger, log_event
 from .telemetry.middleware import RequestContextMiddleware
 from .telemetry.otel import configure_tracing
@@ -91,6 +91,7 @@ def create_app(
     route_sets: Optional[Dict[str, RouteSet]] = None,
     tracer: Optional[trace.Tracer] = None,
     debug_capture_store: Optional[DebugCaptureStore] = None,
+    audit_store: Optional[S3AuditStore] = None,
     iam_tenant_resolver: Optional[IamTenantResolver] = None,
     job_store: Optional[JobStore] = None,
     job_queue: Optional[JobQueue] = None,
@@ -188,6 +189,8 @@ def create_app(
         )
     if debug_capture_store is None:
         debug_capture_store = DebugCaptureStore(ttl_s=settings.debug_capture_ttl_s)
+    if audit_store is None and settings.audit_bucket_name:
+        audit_store = S3AuditStore(bucket=settings.audit_bucket_name, region=settings.aws_region)
     if job_store is None:
         job_store = (
             DynamoDbJobStore(table_name=settings.jobs_table_name, region=settings.aws_region)
@@ -232,6 +235,7 @@ def create_app(
         tracer=tracer,
         debug_capture_store=debug_capture_store,
         usage_store=usage_store,
+        audit_store=audit_store,
     )
     admin_router = build_admin_router(
         policy_store=policy_store,

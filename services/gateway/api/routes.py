@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from opentelemetry import trace
@@ -38,7 +39,7 @@ from ..routing.circuit_breaker import CircuitBreaker
 from ..routing.router import AllRoutesUnavailableError, CertifiedRouter
 from ..streaming import stream_chat_response
 from ..telemetry.cost import estimate_cost
-from ..telemetry.debug_capture import DebugCaptureStore
+from ..telemetry.debug_capture import DebugCaptureStore, S3AuditStore
 from ..telemetry.logging import get_logger, log_event
 from ..telemetry.otel import set_span_attributes
 from ..telemetry.slo import slo_breached
@@ -72,6 +73,7 @@ def build_router(
     tracer: trace.Tracer,
     debug_capture_store: DebugCaptureStore,
     usage_store: UsageStore,
+    audit_store: Optional[S3AuditStore] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -197,11 +199,19 @@ def build_router(
                     cached.model_id, input_tokens=cached.input_tokens, output_tokens=cached.output_tokens
                 )
                 usage_store.add_and_get(identity.tenant_id, current_month(), estimated_cost)
+                payload_ref = None
                 if policy.debug_capture_enabled:
                     debug_capture_store.capture(
                         request_id=request_id, tenant_id=identity.tenant_id,
                         input_text=combined_input_text, output_text=cached.text,
                     )
+                    if audit_store is not None:
+                        payload_ref = audit_store.write(
+                            request_id=request_id, tenant_id=identity.tenant_id,
+                            application_id=identity.application_id, model=cached.model_id,
+                            input_text=combined_input_text, output_text=cached.text,
+                            input_tokens=cached.input_tokens, output_tokens=cached.output_tokens,
+                        )
                 set_span_attributes(
                     span, status=200, model=cached.model_id,
                     guardrail_version=policy.guardrail_policy, guardrail_action="ALLOW",
@@ -215,7 +225,7 @@ def build_router(
                     request_id=request_id,
                     tenant_id=identity.tenant_id, route_set=policy.route_set, policy_epoch=policy.policy_epoch,
                     model=cached.model_id, guardrail_version=policy.guardrail_policy,
-                    guardrail_action="ALLOW", blocked_reason=None,
+                    guardrail_action="ALLOW", blocked_reason=None, payload_ref=payload_ref,
                     input_tokens=cached.input_tokens, output_tokens=cached.output_tokens,
                     guardrail_latency_ms=input_guardrail_ms, ttft_ms=None, latency_ms=0.0,
                     retry_count=0, fallback=False, cache_hit=True,
@@ -301,11 +311,19 @@ def build_router(
                 ),
             )
 
+            payload_ref = None
             if policy.debug_capture_enabled:
                 debug_capture_store.capture(
                     request_id=request_id, tenant_id=identity.tenant_id,
                     input_text=combined_input_text, output_text=result.text,
                 )
+                if audit_store is not None:
+                    payload_ref = audit_store.write(
+                        request_id=request_id, tenant_id=identity.tenant_id,
+                        application_id=identity.application_id, model=routed.model_id,
+                        input_text=combined_input_text, output_text=result.text,
+                        input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                    )
 
             estimated_cost = estimate_cost(
                 routed.model_id, input_tokens=result.input_tokens, output_tokens=result.output_tokens
@@ -332,6 +350,7 @@ def build_router(
                 guardrail_version=policy.guardrail_policy,
                 guardrail_action="ALLOW",
                 blocked_reason=None,
+                payload_ref=payload_ref,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),

@@ -107,6 +107,11 @@ def load_policies_from_yaml(path: str) -> InMemoryPolicyStore:
             policy_epoch=int(cfg.get("policy_epoch", 1)),
             allow_guardrail_bypass_on_error=bool(cfg.get("allow_guardrail_bypass_on_error", False)),
             debug_capture_enabled=bool(cfg.get("debug_capture_enabled", False)),
+            debug_capture_retention_days=(
+                int(cfg["debug_capture_retention_days"])
+                if cfg.get("debug_capture_retention_days") is not None
+                else None
+            ),
             monthly_budget=(
                 float(cfg["monthly_budget"]) if cfg.get("monthly_budget") is not None else None
             ),
@@ -148,6 +153,8 @@ def _policy_to_item(policy: TenantPolicy) -> Dict[str, Any]:
         item["slo_p95_latency_ms"] = Decimal(str(policy.slo.p95_latency_ms))
     if policy.monthly_budget is not None:
         item["monthly_budget"] = Decimal(str(policy.monthly_budget))
+    if policy.debug_capture_retention_days is not None:
+        item["debug_capture_retention_days"] = policy.debug_capture_retention_days
     return item
 
 
@@ -165,6 +172,9 @@ def _item_to_policy(item: Dict[str, Any]) -> TenantPolicy:
         policy_epoch=int(item["policy_epoch"]),
         allow_guardrail_bypass_on_error=bool(item.get("allow_guardrail_bypass_on_error", False)),
         debug_capture_enabled=bool(item.get("debug_capture_enabled", False)),
+        debug_capture_retention_days=(
+            int(item["debug_capture_retention_days"]) if "debug_capture_retention_days" in item else None
+        ),
         monthly_budget=float(item["monthly_budget"]) if "monthly_budget" in item else None,
     )
 

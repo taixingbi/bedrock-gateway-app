@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import unittest
+from datetime import datetime, timezone
 
 from starlette.testclient import TestClient
 
@@ -10,7 +11,7 @@ from ..main import create_app
 from ..policy.models import TenantPolicy, TenantState
 from ..policy.store import InMemoryPolicyStore
 from ..telemetry.cost import DEFAULT_PRICING, estimate_cost
-from ..telemetry.debug_capture import DebugCaptureStore, redact
+from ..telemetry.debug_capture import DebugCaptureStore, S3AuditStore, redact
 from ..telemetry.logging import JsonFormatter
 from ..telemetry.slo import slo_breached
 from .auth_fixtures import auth_header, get_auth_fixture
@@ -86,6 +87,50 @@ class DebugCaptureTests(unittest.TestCase):
 
         clock.advance(31.0)
         self.assertIsNone(store.get("req-1"))
+
+
+class _FakeS3Client:
+    def __init__(self):
+        self.calls = []
+
+    def put_object(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+class S3AuditStoreTests(unittest.TestCase):
+    def test_write_returns_s3_uri_and_puts_the_object(self):
+        client = _FakeS3Client()
+        store = S3AuditStore(bucket="audit-bucket", client=client, clock=lambda: datetime(2026, 9, 17, 23, 14, tzinfo=timezone.utc))
+
+        payload_ref = store.write(
+            request_id="req-1", tenant_id="tenant-a", application_id="team-a-ai-client",
+            model="us.amazon.nova-micro-v1:0", input_text="hi", output_text="hello",
+            input_tokens=1, output_tokens=1,
+        )
+
+        self.assertEqual(payload_ref, "s3://audit-bucket/tenant-a/2026/09/17/req-1.json")
+        self.assertEqual(len(client.calls), 1)
+        call = client.calls[0]
+        self.assertEqual(call["Bucket"], "audit-bucket")
+        self.assertEqual(call["Key"], "tenant-a/2026/09/17/req-1.json")
+        self.assertEqual(call["ServerSideEncryption"], "AES256")
+
+    def test_object_body_is_redacted(self):
+        client = _FakeS3Client()
+        store = S3AuditStore(bucket="audit-bucket", client=client)
+
+        store.write(
+            request_id="req-1", tenant_id="tenant-a", application_id="team-a-ai-client",
+            model="us.amazon.nova-micro-v1:0", input_text="my email is a@b.com",
+            output_text="got it, a@b.com noted", input_tokens=1, output_tokens=1,
+        )
+
+        body = json.loads(client.calls[0]["Body"])
+        self.assertNotIn("a@b.com", json.dumps(body))
+        self.assertIn("[REDACTED_EMAIL]", body["request"]["input_text"])
+        self.assertEqual(body["tenant_id"], "tenant-a")
+        self.assertEqual(body["application_id"], "team-a-ai-client")
+        self.assertEqual(body["response"]["input_tokens"], 1)
 
 
 class SpanAttributeTests(unittest.TestCase):
@@ -358,6 +403,79 @@ class PiiSafeLoggingTests(unittest.TestCase):
         self.assertEqual(record.tenant_id, "acme")
         self.assertIn("reach support", record.redacted_input)
         self.assertIn("happy to help", record.redacted_output)
+
+    def test_payload_ref_present_when_audit_store_configured_and_enabled(self):
+        fake = FakeConverseClient(response_text="sure thing")
+        settings = load_settings()
+        fixture = get_auth_fixture()
+        policy_store = InMemoryPolicyStore(
+            {"acme": _policy(tenant_id="acme", debug_capture_enabled=True)}
+        )
+        tracer, _exporter = make_test_tracer()
+        s3_client = _FakeS3Client()
+        audit_store = S3AuditStore(bucket="audit-bucket", client=s3_client)
+        app = create_app(
+            settings=settings, converse_client=fake, token_verifier=fixture.verifier,
+            policy_store=policy_store, tracer=tracer, audit_store=audit_store,
+        )
+        client = TestClient(app)
+        token = fixture.token(tenant_id="acme")
+
+        captured = io.StringIO()
+        handler = logging.StreamHandler(captured)
+        handler.setFormatter(JsonFormatter())
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            resp = client.post(
+                "/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]}, headers=auth_header(token)
+            )
+        finally:
+            root.removeHandler(handler)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(s3_client.calls), 1)
+        lines = [json.loads(line) for line in captured.getvalue().splitlines() if line.strip()]
+        completed = next(line for line in lines if line.get("message") == "chat request completed")
+        expected_ref = f"s3://audit-bucket/{s3_client.calls[0]['Key']}"
+        self.assertEqual(completed["payload_ref"], expected_ref)
+
+    def test_payload_ref_null_when_no_audit_store_configured(self):
+        """debug_capture_enabled alone (no audit_store passed -- the
+        default in every other test in this file, and in prod whenever
+        AUDIT_BUCKET_NAME is unset) must not crash or silently invent a
+        payload_ref -- it stays null, matching blocked_reason's existing
+        always-present-even-when-null convention."""
+        fake = FakeConverseClient(response_text="sure thing")
+        settings = load_settings()
+        fixture = get_auth_fixture()
+        policy_store = InMemoryPolicyStore(
+            {"acme": _policy(tenant_id="acme", debug_capture_enabled=True)}
+        )
+        tracer, _exporter = make_test_tracer()
+        app = create_app(
+            settings=settings, converse_client=fake, token_verifier=fixture.verifier,
+            policy_store=policy_store, tracer=tracer,
+        )
+        client = TestClient(app)
+        token = fixture.token(tenant_id="acme")
+
+        captured = io.StringIO()
+        handler = logging.StreamHandler(captured)
+        handler.setFormatter(JsonFormatter())
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            resp = client.post(
+                "/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]}, headers=auth_header(token)
+            )
+        finally:
+            root.removeHandler(handler)
+
+        self.assertEqual(resp.status_code, 200)
+        lines = [json.loads(line) for line in captured.getvalue().splitlines() if line.strip()]
+        completed = next(line for line in lines if line.get("message") == "chat request completed")
+        self.assertIsNone(completed["payload_ref"])
 
 
 if __name__ == "__main__":
