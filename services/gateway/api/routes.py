@@ -82,9 +82,10 @@ def build_router(
     @api_router.post("/v1/chat", response_model=ChatResponse, response_model_exclude_none=True)
     async def chat(request: Request, chat_request: ChatRequest):
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+        session_id = getattr(request.state, "session_id", "")
 
         with tracer.start_as_current_span("chat.request") as span:
-            set_span_attributes(span, request_id=request_id)
+            set_span_attributes(span, request_id=request_id, session_id=session_id or None)
 
             try:
                 identity = pipeline.authenticate(
@@ -94,6 +95,7 @@ def build_router(
                     iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
                     iam_tenant_resolver=iam_tenant_resolver,
                     request_id=request_id,
+                    session_id=session_id or None,
                 )
                 pipeline.authorize(identity, required_role=settings.chat_required_role)
                 policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)

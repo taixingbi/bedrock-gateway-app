@@ -50,6 +50,7 @@ def authenticate_iam(
     *,
     iam_tenant_resolver: IamTenantResolver,
     request_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Identity:
     """Stage 1 (AWS_IAM path): maps an already SigV4-verified IAM
     principal ARN to an Identity via `policies/iam_tenants.yaml`.
@@ -61,7 +62,7 @@ def authenticate_iam(
     docstring for why that's safe to trust here.
     """
     try:
-        grant = iam_tenant_resolver.resolve(principal_arn, request_id=request_id)
+        grant = iam_tenant_resolver.resolve(principal_arn, request_id=request_id, session_id=session_id)
     except AuthError as exc:
         raise PipelineError(403, exc.code, str(exc)) from exc
 
@@ -83,6 +84,7 @@ def authenticate(
     iam_account_id: Optional[str] = None,
     iam_tenant_resolver: Optional[IamTenantResolver] = None,
     request_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Identity:
     """Stage 1: Auth. Derives an Identity from whichever verified source
     the request arrived through.
@@ -99,7 +101,11 @@ def authenticate(
         if iam_tenant_resolver is None:
             raise PipelineError(500, "IAM_AUTH_NOT_CONFIGURED", "aws_iam auth is not configured")
         return authenticate_iam(
-            iam_principal_arn, iam_account_id, iam_tenant_resolver=iam_tenant_resolver, request_id=request_id
+            iam_principal_arn,
+            iam_account_id,
+            iam_tenant_resolver=iam_tenant_resolver,
+            request_id=request_id,
+            session_id=session_id,
         )
 
     if not authorization_header or not authorization_header.startswith("Bearer "):

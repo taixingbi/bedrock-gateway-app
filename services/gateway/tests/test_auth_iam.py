@@ -25,7 +25,7 @@ class _FakeIamTenantResolver:
     def __init__(self, grants: dict):
         self._grants = grants
 
-    def resolve(self, principal_arn: str, *, request_id=None) -> IamPrincipalGrant:
+    def resolve(self, principal_arn: str, *, request_id=None, session_id=None) -> IamPrincipalGrant:
         grant = self._grants.get(principal_arn)
         if grant is None:
             raise AuthError(
@@ -442,6 +442,54 @@ class HttpIamTenantResolverTests(unittest.TestCase):
         # before the request is sent.
         (injected_carrier,), _ = mock_inject.call_args
         self.assertIn("content-type", injected_carrier)
+
+    def test_forwards_session_id_as_header(self):
+        import io
+        from unittest.mock import patch
+
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        class _Resp:
+            def __enter__(self_):
+                return io.BytesIO(
+                    b'{"decision":"ALLOW","tenant_id":"search","application_id":"search-dev",'
+                    b'"roles":[],"policy_id":"iam-principal-mapping-v1","reason":"principal is mapped"}'
+                )
+
+            def __exit__(self_, *args):
+                return False
+
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        with patch("urllib.request.urlopen", return_value=_Resp()) as mock_urlopen:
+            resolver.resolve("arn:aws:iam::123:role/x", session_id="sess-xyz-789")
+
+        sent_request = mock_urlopen.call_args[0][0]
+        self.assertEqual(sent_request.get_header("X-session-id"), "sess-xyz-789")
+
+    def test_omits_session_id_header_when_not_given(self):
+        import io
+        from unittest.mock import patch
+
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        class _Resp:
+            def __enter__(self_):
+                return io.BytesIO(
+                    b'{"decision":"ALLOW","tenant_id":"search","application_id":"search-dev",'
+                    b'"roles":[],"policy_id":"iam-principal-mapping-v1","reason":"principal is mapped"}'
+                )
+
+            def __exit__(self_, *args):
+                return False
+
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        with patch("urllib.request.urlopen", return_value=_Resp()) as mock_urlopen:
+            resolver.resolve("arn:aws:iam::123:role/x")
+
+        sent_request = mock_urlopen.call_args[0][0]
+        self.assertIsNone(sent_request.get_header("X-session-id"))
 
 
 if __name__ == "__main__":

@@ -172,6 +172,69 @@ class JsonFormatterIdentityFieldsTests(unittest.TestCase):
         self.assertEqual(line["environment"], "")
 
 
+class JsonFormatterTraceAndSessionFieldsTests(unittest.TestCase):
+    """trace_id/span_id come from whatever OTel span is current at log
+    time (never fabricated when there is none); session_id comes from
+    telemetry/logging.py's session_id_ctx, set by
+    telemetry/middleware.py from the inbound X-Session-Id header."""
+
+    def test_trace_id_and_span_id_present_inside_a_span(self):
+        tracer, _exporter = make_test_tracer()
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        with tracer.start_as_current_span("test.span") as span:
+            line = json.loads(formatter.format(record))
+            expected_trace_id = format(span.get_span_context().trace_id, "032x")
+            expected_span_id = format(span.get_span_context().span_id, "016x")
+
+        self.assertEqual(line["trace_id"], expected_trace_id)
+        self.assertEqual(line["span_id"], expected_span_id)
+
+    def test_trace_id_absent_outside_any_span(self):
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        line = json.loads(formatter.format(record))
+
+        self.assertNotIn("trace_id", line)
+        self.assertNotIn("span_id", line)
+
+    def test_session_id_present_when_set(self):
+        from ..telemetry.logging import session_id_ctx
+
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        token = session_id_ctx.set("sess-abc-123")
+        try:
+            line = json.loads(formatter.format(record))
+        finally:
+            session_id_ctx.reset(token)
+
+        self.assertEqual(line["session_id"], "sess-abc-123")
+
+    def test_session_id_absent_when_not_set(self):
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        line = json.loads(formatter.format(record))
+
+        self.assertNotIn("session_id", line)
+
+
 class PiiSafeLoggingTests(unittest.TestCase):
     def test_operational_logs_never_contain_raw_message_content(self):
         """The chat message content is a unique, easy-to-grep marker;

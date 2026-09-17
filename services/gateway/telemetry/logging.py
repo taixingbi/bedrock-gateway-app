@@ -4,7 +4,8 @@ Field order is fixed and intentional (mirrors the convention already used
 for the vLLM gateway's `layer-gateway-llm-inference-v1` structured logs):
 
     ts -> level -> service -> environment -> logger -> request_id
-    -> <event-specific fields> -> message -> error
+    -> trace_id -> span_id -> session_id -> <event-specific fields>
+    -> message -> error
 
 `service`/`environment` are fixed per-process (e.g. "gateway-api"/"dev"),
 never per-request -- they exist so a log aggregated across every
@@ -14,18 +15,31 @@ group it came from. Same two fields, same position, in
 platform-authz-service's own copy of this module and in
 platform-api-gateway's access log format.
 
+`trace_id`/`span_id` are pulled automatically from whatever OTel span is
+current when the log call happens (telemetry/otel.py) -- omitted
+entirely when there is none (an invalid/no-op span context), never
+fabricated. `session_id` comes from `_session_id_ctx`, set by
+telemetry/middleware.py from the inbound `x-session-id` header (empty
+when the caller didn't send one) -- unlike request_id, no session_id
+is invented when absent, since a made-up one wouldn't actually group
+anything. Both are ContextVars rather than explicit log_event()
+arguments so every call site gets them for free, the same way every
+call site already gets `service`/`environment` for free.
+
 Every log line is one JSON object on one line (easy to ship to
 CloudWatch/Loki and to grep in dev). `error` is only present when a value
 was actually passed, so success lines don't carry a stray `"error": null`.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import sys
 import time
 from typing import Any, Optional
 
+from opentelemetry import trace
 
 _RESERVED_LOGRECORD_KEYS = {
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
@@ -33,6 +47,11 @@ _RESERVED_LOGRECORD_KEYS = {
     "created", "msecs", "relativeCreated", "thread", "threadName",
     "processName", "process", "message", "taskName",
 }
+
+# Set by telemetry/middleware.py's RequestContextMiddleware from the
+# inbound x-session-id header; read here so every log line picks it up
+# without each call site having to pass it explicitly.
+session_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("gateway_session_id", default="")
 
 
 class JsonFormatter(logging.Formatter):
@@ -60,6 +79,16 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "request_id": request_id,
         }
+
+        span_context = trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            ordered["trace_id"] = format(span_context.trace_id, "032x")
+            ordered["span_id"] = format(span_context.span_id, "016x")
+
+        session_id = session_id_ctx.get()
+        if session_id:
+            ordered["session_id"] = session_id
+
         ordered.update(extra)
         ordered["message"] = record.getMessage()
         if error is not None:
