@@ -360,6 +360,55 @@ class HttpIamTenantResolverTests(unittest.TestCase):
         sent_request = mock_urlopen.call_args[0][0]
         self.assertIsNone(sent_request.get_header("X-request-id"))
 
+    def test_ca_cert_pem_builds_a_pinned_ssl_context(self):
+        """authz-service's ALB cert is issued by a private CA no public
+        trust store knows about -- ca_cert_pem pins verification to
+        exactly that CA instead of relying on the system default (see
+        bedrock-gateway-infra's aws_acmpca_certificate_authority)."""
+        import ssl
+        from unittest.mock import patch
+
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        sentinel_context = object()
+        with patch("ssl.create_default_context", return_value=sentinel_context) as mock_create:
+            resolver = HttpIamTenantResolver(base_url="https://authz.internal", ca_cert_pem="-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----")
+
+        mock_create.assert_called_once_with(cadata="-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----")
+        self.assertIs(resolver._ssl_context, sentinel_context)
+
+    def test_no_ca_cert_pem_means_no_pinned_context(self):
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        resolver = HttpIamTenantResolver(base_url="http://authz.internal:8080")
+
+        self.assertIsNone(resolver._ssl_context)
+
+    def test_pinned_context_is_passed_to_urlopen(self):
+        import io
+        from unittest.mock import patch
+
+        from ..auth.aws_iam import HttpIamTenantResolver
+
+        class _Resp:
+            def __enter__(self_):
+                return io.BytesIO(
+                    b'{"decision":"ALLOW","tenant_id":"search","application_id":"search-dev",'
+                    b'"roles":[],"policy_id":"iam-principal-mapping-v1","reason":"principal is mapped"}'
+                )
+
+            def __exit__(self_, *args):
+                return False
+
+        sentinel_context = object()
+        with patch("ssl.create_default_context", return_value=sentinel_context):
+            resolver = HttpIamTenantResolver(base_url="https://authz.internal", ca_cert_pem="fake-pem")
+
+        with patch("urllib.request.urlopen", return_value=_Resp()) as mock_urlopen:
+            resolver.resolve("arn:aws:iam::123:role/x")
+
+        self.assertIs(mock_urlopen.call_args.kwargs["context"], sentinel_context)
+
 
 if __name__ == "__main__":
     unittest.main()

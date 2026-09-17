@@ -270,11 +270,24 @@ class HttpIamTenantResolver:
     urllib.request, not a new HTTP client dependency -- same choice
     jwt_verifier.py's JwksVerifier already made for its own outbound
     call.
+
+    `ca_cert_pem`, when set, pins TLS verification to exactly that CA
+    instead of the system trust store -- authz-service's ALB cert is
+    issued by a private CA (bedrock-gateway-infra's
+    aws_acmpca_certificate_authority.internal), which no public trust
+    store knows about, so the default `ssl` behavior would reject it.
+    Empty means "use the system default" (plain HTTP in dev/tests, or
+    an environment that hasn't set this up).
     """
 
-    def __init__(self, *, base_url: str, timeout_s: float = 5.0):
+    def __init__(self, *, base_url: str, timeout_s: float = 5.0, ca_cert_pem: str = ""):
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
+        self._ssl_context = None
+        if ca_cert_pem:
+            import ssl
+
+            self._ssl_context = ssl.create_default_context(cadata=ca_cert_pem)
 
     def resolve(self, principal_arn: str, *, request_id: Optional[str] = None) -> IamPrincipalGrant:
         import json
@@ -298,7 +311,9 @@ class HttpIamTenantResolver:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout_s) as resp:  # noqa: S310 (fixed internal URL, not user input)
+            with urllib.request.urlopen(
+                request, timeout=self._timeout_s, context=self._ssl_context
+            ) as resp:  # noqa: S310 (fixed internal URL, not user input)
                 data = json.loads(resp.read())
         except urllib.error.URLError as exc:
             raise AuthError(
@@ -317,7 +332,9 @@ class HttpIamTenantResolver:
         import json
         import urllib.request
 
-        with urllib.request.urlopen(f"{self._base_url}/v1/grants", timeout=self._timeout_s) as resp:  # noqa: S310
+        with urllib.request.urlopen(
+            f"{self._base_url}/v1/grants", timeout=self._timeout_s, context=self._ssl_context
+        ) as resp:  # noqa: S310
             data = json.loads(resp.read())
         return {
             arn: IamPrincipalGrant(

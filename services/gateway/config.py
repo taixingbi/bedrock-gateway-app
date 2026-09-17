@@ -109,6 +109,12 @@ class Settings:
     # other *_TABLE_NAME/*_URL setting in this file.
     authz_service_url: str
 
+    # PEM-encoded CA certificate HttpIamTenantResolver pins TLS
+    # verification to, since authz-service's ALB cert is issued by a
+    # private CA no public trust store knows about. Empty -> use the
+    # system default (fine for plain HTTP in dev/tests).
+    authz_ca_cert_pem: str
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -160,4 +166,5 @@ def load_settings() -> Settings:
             "PROVISIONED_PRINCIPAL_MAPPINGS_TABLE_NAME", ""
         ),
         authz_service_url=os.environ.get("AUTHZ_SERVICE_URL", ""),
+        authz_ca_cert_pem=os.environ.get("AUTHZ_CA_CERT_PEM", ""),
     )
