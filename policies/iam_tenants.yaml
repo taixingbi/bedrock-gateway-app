@@ -63,37 +63,45 @@ iam_principals:
     roles: [developer]
 
   # Plan section 29's dedicated-tenant-account model -- tenant-a/tenant-b
-  # each have their own AWS account (998116076808 / 199013204390) rather
-  # than living in this account like every principal above, and are
+  # each have their own AWS account (998116076808 / 199013204390),
   # deliberately kept as separate tenant_ids from team-a (not merged) --
   # team-a stays the shared-account demo tenant (this account, tiny
   # smoke-test budget), tenant-a/tenant-b are the dedicated-account
-  # isolation demo, showing both tenancy models side by side. Role name
-  # is team-a-ai-client/team-b-ai-client -- same application identity
-  # convention as the shared-account team-a-ai-client role, just running
-  # from its own account instead of this one; tenant_id is what actually
-  # differs. NOT YET REACHABLE: no such IAM role has actually been
-  # created in either account yet (creating one is an IAM permission
-  # grant, out of scope for this change), so a caller assuming these
-  # ARNs doesn't exist yet -- these entries just say what a role would
-  # need to be named for the mapping to work once one is created and
-  # granted execute-api:Invoke on the /iam/* route (see infra/README.md).
-  "arn:aws:iam::998116076808:role/team-a-ai-client":
+  # isolation demo, showing both tenancy models side by side.
+  #
+  # Tested live 2026-09-17: a tenant account calling this API directly
+  # with its own SigV4 credentials (team-a-ai-client in 998116076808)
+  # 403s -- this platform's HTTP API v2 + AWS_IAM authorizer does not
+  # support cross-account invocation via a caller-side identity policy
+  # alone, and HTTP API v2 has no resource-policy mechanism to grant
+  # that trust either (unlike REST API v1). See plan.md section 29 for
+  # the two alternatives not taken.
+  #
+  # Fix: an assume-role hop. The tenant's own workload role
+  # (team-a-ai-client / team-b-ai-client, in its own account) assumes
+  # ANOTHER role that lives in THIS account -- tenant-a-platform-caller /
+  # tenant-b-platform-caller, trusting only that specific tenant-account
+  # role -- and calls the gateway with those (same-account) credentials
+  # instead. The gateway only ever sees the platform-side assumed-role
+  # ARN below, never the tenant account's own role directly, which is
+  # why the mapping keys off tenant-a-platform-caller, not
+  # tenant-a's team-a-ai-client.
+  "arn:aws:iam::646821141010:role/tenant-a-platform-caller":
     tenant_id: tenant-a
     application_id: team-a-ai-client
     roles: [developer]
 
-  "arn:aws:sts::998116076808:assumed-role/team-a-ai-client/*":
+  "arn:aws:sts::646821141010:assumed-role/tenant-a-platform-caller/*":
     tenant_id: tenant-a
     application_id: team-a-ai-client
     roles: [developer]
 
-  "arn:aws:iam::199013204390:role/team-b-ai-client":
+  "arn:aws:iam::646821141010:role/tenant-b-platform-caller":
     tenant_id: tenant-b
     application_id: team-b-ai-client
     roles: [developer]
 
-  "arn:aws:sts::199013204390:assumed-role/team-b-ai-client/*":
+  "arn:aws:sts::646821141010:assumed-role/tenant-b-platform-caller/*":
     tenant_id: tenant-b
     application_id: team-b-ai-client
     roles: [developer]
