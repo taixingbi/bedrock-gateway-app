@@ -212,13 +212,14 @@ def build_router(
                 )
                 log_event(
                     _chat_logger, "INFO", "chat request completed",
-                    request_id=request_id, model=cached.model_id, tenant_id=identity.tenant_id,
-                    policy_epoch=policy.policy_epoch, route_set=policy.route_set,
-                    guardrail_version=policy.guardrail_policy, guardrail_action="ALLOW",
-                    guardrail_latency_ms=input_guardrail_ms, blocked_reason=None,
+                    request_id=request_id,
+                    tenant_id=identity.tenant_id, route_set=policy.route_set, policy_epoch=policy.policy_epoch,
+                    model=cached.model_id, guardrail_version=policy.guardrail_policy,
+                    guardrail_action="ALLOW", blocked_reason=None,
                     input_tokens=cached.input_tokens, output_tokens=cached.output_tokens,
-                    ttft_ms=None, latency_ms=0.0, retry_count=0, fallback=False,
-                    cache_hit=True, status=200, estimated_cost=estimated_cost, slo_breach=False,
+                    guardrail_latency_ms=input_guardrail_ms, ttft_ms=None, latency_ms=0.0,
+                    retry_count=0, fallback=False, cache_hit=True,
+                    estimated_cost=estimated_cost, slo_breach=False, status=200,
                 )
                 response = ChatResponse(
                     request_id=request_id,
@@ -324,24 +325,24 @@ def build_router(
             log_event(
                 _chat_logger, "INFO", "chat request completed",
                 request_id=request_id,
-                model=routed.model_id,
                 tenant_id=identity.tenant_id,
-                policy_epoch=policy.policy_epoch,
                 route_set=policy.route_set,
+                policy_epoch=policy.policy_epoch,
+                model=routed.model_id,
                 guardrail_version=policy.guardrail_policy,
                 guardrail_action="ALLOW",
-                guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
                 blocked_reason=None,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
+                guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
                 ttft_ms=None,
                 latency_ms=result.latency_ms,
                 retry_count=result.retry_count,
                 fallback=routed.fallback,
                 cache_hit=False,
-                status=200,
                 estimated_cost=estimated_cost,
                 slo_breach=breached,
+                status=200,
             )
 
             response = ChatResponse(

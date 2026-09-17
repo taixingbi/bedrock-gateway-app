@@ -3,9 +3,9 @@
 Field order is fixed and intentional (mirrors the convention already used
 for the vLLM gateway's `layer-gateway-llm-inference-v1` structured logs):
 
-    ts -> level -> service -> environment -> logger -> request_id
-    -> trace_id -> span_id -> session_id -> api_gateway_request_id
-    -> <event-specific fields> -> message -> error
+    ts -> level -> service -> environment -> logger -> message
+    -> request_id -> api_gateway_request_id -> trace_id -> span_id
+    -> session_id -> <event-specific fields> -> error
 
 `service`/`environment` are fixed per-process (e.g. "gateway-api"/"dev"),
 never per-request -- they exist so a log aggregated across every
@@ -94,8 +94,13 @@ class JsonFormatter(logging.Formatter):
             "service": self._service,
             "environment": self._environment,
             "logger": record.name,
+            "message": record.getMessage(),
             "request_id": request_id,
         }
+
+        api_gateway_request_id = api_gateway_request_id_ctx.get()
+        if api_gateway_request_id:
+            ordered["api_gateway_request_id"] = api_gateway_request_id
 
         span_context = trace.get_current_span().get_span_context()
         if span_context.is_valid:
@@ -106,12 +111,7 @@ class JsonFormatter(logging.Formatter):
         if session_id:
             ordered["session_id"] = session_id
 
-        api_gateway_request_id = api_gateway_request_id_ctx.get()
-        if api_gateway_request_id:
-            ordered["api_gateway_request_id"] = api_gateway_request_id
-
         ordered.update(extra)
-        ordered["message"] = record.getMessage()
         if error is not None:
             ordered["error"] = error
         elif record.exc_info:
