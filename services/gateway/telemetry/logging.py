@@ -3,7 +3,16 @@
 Field order is fixed and intentional (mirrors the convention already used
 for the vLLM gateway's `layer-gateway-llm-inference-v1` structured logs):
 
-    ts -> level -> logger -> request_id -> <event-specific fields> -> message -> error
+    ts -> level -> service -> environment -> logger -> request_id
+    -> <event-specific fields> -> message -> error
+
+`service`/`environment` are fixed per-process (e.g. "gateway-api"/"dev"),
+never per-request -- they exist so a log aggregated across every
+service's CloudWatch log group (or a future centralized Loki/ELK
+instance) can be filtered/grouped without needing to know which log
+group it came from. Same two fields, same position, in
+platform-authz-service's own copy of this module and in
+platform-api-gateway's access log format.
 
 Every log line is one JSON object on one line (easy to ship to
 CloudWatch/Loki and to grep in dev). `error` is only present when a value
@@ -29,6 +38,11 @@ _RESERVED_LOGRECORD_KEYS = {
 class JsonFormatter(logging.Formatter):
     """Renders a LogRecord as one ordered JSON object per line."""
 
+    def __init__(self, *, service: str = "", environment: str = "") -> None:
+        super().__init__()
+        self._service = service
+        self._environment = environment
+
     def format(self, record: logging.LogRecord) -> str:
         extra = {
             k: v
@@ -41,6 +55,8 @@ class JsonFormatter(logging.Formatter):
         ordered: dict[str, Any] = {
             "ts": _iso_ts(record.created),
             "level": record.levelname,
+            "service": self._service,
+            "environment": self._environment,
             "logger": record.name,
             "request_id": request_id,
         }
@@ -60,8 +76,16 @@ def _iso_ts(epoch_seconds: float) -> str:
     )
 
 
-def configure_logging(service_name: str, level: str = "INFO") -> None:
+def configure_logging(
+    service_name: str, level: str = "INFO", *, service: str = "", environment: str = ""
+) -> None:
     """Configure the root logger to emit structured JSON on stdout.
+
+    `service_name` names the logger whose level this sets (e.g.
+    "gateway-dev", historically also used as this process's OTel
+    resource name) -- unrelated to `service`/`environment`, the fixed
+    identity fields stamped onto every emitted line (see module
+    docstring).
 
     Idempotent -- safe to call more than once (e.g. once from app startup,
     once from a test fixture).
@@ -73,7 +97,7 @@ def configure_logging(service_name: str, level: str = "INFO") -> None:
     root.handlers = [h for h in root.handlers if not isinstance(h, _GatewayStreamHandler)]
 
     handler = _GatewayStreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter())
+    handler.setFormatter(JsonFormatter(service=service, environment=environment))
     root.addHandler(handler)
 
     logging.getLogger(service_name).setLevel(level.upper())

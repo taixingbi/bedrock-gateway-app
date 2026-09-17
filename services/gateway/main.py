@@ -102,7 +102,9 @@ def create_app(
     iam_tenant_resolver_primary: Optional[ProvisionedIamTenantResolver] = None,
 ) -> FastAPI:
     settings = settings or load_settings()
-    configure_logging(settings.service_name, settings.log_level)
+    configure_logging(
+        settings.service_name, settings.log_level, service=settings.service, environment=settings.environment
+    )
 
     if converse_client is None:
         converse_client = BedrockClient(

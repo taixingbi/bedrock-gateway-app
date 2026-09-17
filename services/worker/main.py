@@ -59,7 +59,9 @@ def run_forever(
 
 def main() -> None:
     settings = load_settings()
-    configure_logging(settings.service_name, settings.log_level)
+    configure_logging(
+        settings.service_name, settings.log_level, service=settings.service, environment=settings.environment
+    )
 
     if not settings.jobs_queue_url or not settings.jobs_table_name:
         raise RuntimeError(

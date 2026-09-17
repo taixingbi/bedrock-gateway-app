@@ -41,6 +41,15 @@ class Settings:
     service_name: str
     log_level: str
 
+    # Identity fields stamped onto every structured JSON log line (see
+    # telemetry/logging.py) -- distinct from service_name (which names
+    # the OTel resource / logger to set the level on and already varies
+    # per environment, e.g. "gateway-dev"). `service` is the bare,
+    # environment-independent component identity; `environment` is
+    # "dev"/"prod".
+    service: str
+    environment: str
+
     # Request handling
     max_input_chars: int
 
@@ -119,6 +128,8 @@ def load_settings() -> Settings:
         host=os.environ.get("GATEWAY_HOST", "0.0.0.0"),
         port=_env_int("GATEWAY_PORT", 8080),
         service_name=os.environ.get("SERVICE_NAME", "gateway-api"),
+        service=os.environ.get("SERVICE", "bedrock-gateway-api"),
+        environment=os.environ.get("ENVIRONMENT", "dev"),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         max_input_chars=_env_int("MAX_INPUT_CHARS", 32_000),
         oidc_issuer=os.environ.get("OIDC_ISSUER", "https://dev-issuer.local/"),

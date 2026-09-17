@@ -139,6 +139,39 @@ class SpanAttributeTests(unittest.TestCase):
         self.assertEqual(spans[0].attributes["status"], 403)
 
 
+class JsonFormatterIdentityFieldsTests(unittest.TestCase):
+    """Every structured log line carries fixed service/environment
+    identity fields (see telemetry/logging.py's module docstring) so a
+    request can be traced across log sources without already knowing
+    which log group it came from."""
+
+    def test_service_and_environment_are_in_every_line(self):
+        formatter = JsonFormatter(service="bedrock-gateway-api", environment="dev")
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="request completed", args=(), exc_info=None,
+        )
+
+        line = json.loads(formatter.format(record))
+
+        self.assertEqual(line["service"], "bedrock-gateway-api")
+        self.assertEqual(line["environment"], "dev")
+
+    def test_defaults_to_empty_string_when_unconfigured(self):
+        """JsonFormatter() with no args (as used by ad hoc test/dev
+        handlers) must not raise -- see PiiSafeLoggingTests below."""
+        formatter = JsonFormatter()
+        record = logging.LogRecord(
+            name="gateway.access", level=logging.INFO, pathname="", lineno=0,
+            msg="x", args=(), exc_info=None,
+        )
+
+        line = json.loads(formatter.format(record))
+
+        self.assertEqual(line["service"], "")
+        self.assertEqual(line["environment"], "")
+
+
 class PiiSafeLoggingTests(unittest.TestCase):
     def test_operational_logs_never_contain_raw_message_content(self):
         """The chat message content is a unique, easy-to-grep marker;
