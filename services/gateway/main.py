@@ -35,6 +35,7 @@ from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .cache.store import InMemoryResponseCache, ResponseCache
 from .config import Settings, load_settings
 from .guardrails.basic_guardrail import BasicGuardrailClient
+from .guardrails.bedrock_guardrail import BedrockGuardrailClient
 from .guardrails.client import GuardrailClient
 from .inference.bedrock_client import BedrockClient, ConverseClient
 from .jobs.queue import InMemoryJobQueue, JobQueue, SqsJobQueue
@@ -158,7 +159,15 @@ def create_app(
             fallback=FilePolicyStore(settings.tenant_policy_path),
         )
     if guardrail_client is None:
-        guardrail_client = BasicGuardrailClient()
+        guardrail_client = (
+            BedrockGuardrailClient(
+                guardrail_id=settings.bedrock_guardrail_id,
+                guardrail_version=settings.bedrock_guardrail_version,
+                region=settings.aws_region,
+            )
+            if settings.bedrock_guardrail_id
+            else BasicGuardrailClient()
+        )
     if response_cache is None:
         response_cache = InMemoryResponseCache(
             ttl_s=settings.response_cache_ttl_s, max_entries=settings.response_cache_max_entries

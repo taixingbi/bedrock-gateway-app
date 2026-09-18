@@ -88,6 +88,11 @@ class Settings:
     # empty means disabled, same "empty string = off" convention as
     # jobs_queue_url/jobs_table_name below.
     audit_bucket_name: str
+    # BedrockGuardrailClient -- empty guardrail_id means disabled,
+    # falls back to BasicGuardrailClient (see main.py). Version isn't
+    # given its own "off" default since it's meaningless without an id.
+    bedrock_guardrail_id: str
+    bedrock_guardrail_version: str
 
     # M7 async jobs -- both empty by default (in-memory JobStore/JobQueue
     # instead of the real DynamoDB/SQS-backed ones, see main.py). Set in
@@ -166,6 +171,8 @@ def load_settings() -> Settings:
         otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         debug_capture_ttl_s=_env_float("DEBUG_CAPTURE_TTL_S", 900.0),
         audit_bucket_name=os.environ.get("AUDIT_BUCKET_NAME", ""),
+        bedrock_guardrail_id=os.environ.get("BEDROCK_GUARDRAIL_ID", ""),
+        bedrock_guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT"),
         jobs_queue_url=os.environ.get("JOBS_QUEUE_URL", ""),
         jobs_table_name=os.environ.get("JOBS_TABLE_NAME", ""),
         usage_table_name=os.environ.get("USAGE_TABLE_NAME", ""),
