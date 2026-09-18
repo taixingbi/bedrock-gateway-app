@@ -23,10 +23,6 @@
 tenants:
   finance:
     state: ACTIVE
-    # TEMPORARY, live verification only (2026-09-18) -- proving
-    # S3AuditStore's real write path end-to-end (bucket/IAM/redaction),
-    # not a permanent finance-tenant setting. Revert after confirming.
-    debug_capture_enabled: true
     models:
       - us.amazon.nova-micro-v1:0
       # Must a superset of finance-chat-v1's fallbacks (route_sets.yaml)
