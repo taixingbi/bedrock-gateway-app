@@ -62,6 +62,22 @@ iam_principals:
     application_id: finance-manual-smoke-test
     roles: [developer, operator]
 
+  # Manual curl/smoke testing of plan section 30's ABAC retrofit --
+  # tenant_id: finance + roles: [manager] should be able to see/change
+  # finance's own admin data (GET /v1/admin/usage, /v1/admin/tenants,
+  # PUT /v1/admin/tenants/finance/state) but get 403 acting on any
+  # other tenant, unlike finance-manual-smoke-test above (developer
+  # only, can't reach /v1/admin/* at all).
+  "arn:aws:iam::646821141010:role/finance-manager-smoke-test":
+    tenant_id: finance
+    application_id: finance-manager-smoke-test
+    roles: [manager]
+
+  "arn:aws:sts::646821141010:assumed-role/finance-manager-smoke-test/*":
+    tenant_id: finance
+    application_id: finance-manager-smoke-test
+    roles: [manager]
+
   # Plan section 29's dedicated-tenant-account model -- tenant-a/tenant-b
   # each have their own AWS account (998116076808 / 199013204390),
   # deliberately kept as separate tenant_ids from team-a (not merged) --
