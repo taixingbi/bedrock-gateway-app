@@ -32,19 +32,19 @@ iam_principals:
   "arn:aws:iam::646821141010:role/team-a-ai-client":
     tenant_id: team-a
     application_id: team-a-ai-client
-    roles: [developer]
+    roles: [developer, operator]
 
   "arn:aws:sts::646821141010:assumed-role/team-a-ai-client/*":
     tenant_id: team-a
     application_id: team-a-ai-client
-    roles: [developer]
+    roles: [developer, operator]
 
   # Manual curl/smoke testing via the IAM user's own long-term
   # credentials (dev only -- do not add a real IAM user here in prod).
   "arn:aws:iam::646821141010:user/taixingbi":
     tenant_id: team-a
     application_id: manual-smoke-test
-    roles: [developer]
+    roles: [developer, operator]
 
   # Manual curl/smoke testing against the finance tenant specifically
   # (dev only) -- finance has a real monthly_budget (tenants.yaml),
@@ -55,12 +55,12 @@ iam_principals:
   "arn:aws:iam::646821141010:role/finance-manual-smoke-test":
     tenant_id: finance
     application_id: finance-manual-smoke-test
-    roles: [developer]
+    roles: [developer, operator]
 
   "arn:aws:sts::646821141010:assumed-role/finance-manual-smoke-test/*":
     tenant_id: finance
     application_id: finance-manual-smoke-test
-    roles: [developer]
+    roles: [developer, operator]
 
   # Plan section 29's dedicated-tenant-account model -- tenant-a/tenant-b
   # each have their own AWS account (998116076808 / 199013204390),
@@ -89,19 +89,19 @@ iam_principals:
   "arn:aws:iam::646821141010:role/tenant-a-platform-caller":
     tenant_id: tenant-a
     application_id: team-a-ai-client
-    roles: [developer]
+    roles: [developer, operator]
 
   "arn:aws:sts::646821141010:assumed-role/tenant-a-platform-caller/*":
     tenant_id: tenant-a
     application_id: team-a-ai-client
-    roles: [developer]
+    roles: [developer, operator]
 
   "arn:aws:iam::646821141010:role/tenant-b-platform-caller":
     tenant_id: tenant-b
     application_id: team-b-ai-client
-    roles: [developer]
+    roles: [developer, operator]
 
   "arn:aws:sts::646821141010:assumed-role/tenant-b-platform-caller/*":
     tenant_id: tenant-b
     application_id: team-b-ai-client
-    roles: [developer]
+    roles: [developer, operator]
