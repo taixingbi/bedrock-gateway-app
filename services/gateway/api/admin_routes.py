@@ -45,10 +45,10 @@ def build_admin_router(
     api_router = APIRouter()
 
     def _authenticate_admin(request: Request):
-        """Shared by every /v1/admin/* handler -- raises pipeline.PipelineError,
-        which each caller turns into the right error response itself
-        (kept explicit at each call site rather than hidden in here, so
-        a handler can't forget to check it)."""
+        """Global-admin-only endpoints (route-sets, applications) --
+        cross-tenant reference data by design, not something a
+        tenant-scoped manager should see filtered or unfiltered
+        (plan section 30.3)."""
         identity = pipeline.authenticate(
             request.headers.get("authorization"),
             token_verifier=token_verifier,
@@ -59,12 +59,32 @@ def build_admin_router(
         pipeline.authorize(identity, required_role=settings.admin_required_role)
         return identity
 
+    def _authenticate_admin_or_manager(request: Request):
+        """Tenant-owned-data endpoints (plan section 30): reachable by
+        either a tenant-scoped manager or a global platform_admin.
+        Callers still need their own tenant-ownership check
+        (authorize_tenant_match) or result filtering on top of this --
+        this only establishes identity + role tier, not which tenant's
+        data they may see."""
+        identity = pipeline.authenticate(
+            request.headers.get("authorization"),
+            token_verifier=token_verifier,
+            iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
+            iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
+            iam_tenant_resolver=iam_tenant_resolver,
+        )
+        pipeline.authorize_any(
+            identity, required_roles=[settings.admin_required_role, settings.manager_required_role]
+        )
+        return identity
+
     @api_router.put("/v1/admin/tenants/{tenant_id}/state")
     async def set_tenant_state(tenant_id: str, body: SetTenantStateBody, request: Request) -> JSONResponse:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
-            identity = _authenticate_admin(request)
+            identity = _authenticate_admin_or_manager(request)
+            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -103,13 +123,20 @@ def build_admin_router(
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
-            _authenticate_admin(request)
+            identity = _authenticate_admin_or_manager(request)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
+        # A list endpoint has no single "resource tenant_id" to gate on
+        # like set_tenant_state does -- a manager sees a filtered
+        # result set instead of a 403 (plan section 30.3).
+        tenant_ids = policy_store.list_tenant_ids()
+        if not identity.has_role(settings.admin_required_role):
+            tenant_ids = [t for t in tenant_ids if t == identity.tenant_id]
+
         month = current_month()
         tenants = []
-        for tenant_id in policy_store.list_tenant_ids():
+        for tenant_id in tenant_ids:
             policy = policy_cache.get(tenant_id)
             spend = usage_store.get(tenant_id, month)
             utilization = (
@@ -137,12 +164,16 @@ def build_admin_router(
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
 
         try:
-            _authenticate_admin(request)
+            identity = _authenticate_admin_or_manager(request)
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
+        tenant_ids = policy_store.list_tenant_ids()
+        if not identity.has_role(settings.admin_required_role):
+            tenant_ids = [t for t in tenant_ids if t == identity.tenant_id]
+
         tenants = []
-        for tenant_id in policy_store.list_tenant_ids():
+        for tenant_id in tenant_ids:
             policy = policy_cache.get(tenant_id)
             tenants.append(
                 {

@@ -117,6 +117,27 @@ class UsageReportEndpointTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 403)
 
+    def test_manager_sees_only_their_own_tenant(self):
+        """plan section 30.3: a list endpoint has no single resource to
+        gate on, so a manager gets a filtered result set instead of a
+        403 -- unlike platform_admin, who still sees every tenant."""
+        policy_store = InMemoryPolicyStore(
+            {
+                "finance": _policy(tenant_id="finance", monthly_budget=100.0),
+                "sandbox": _policy(tenant_id="sandbox", monthly_budget=None),
+            }
+        )
+        usage_store = InMemoryUsageStore()
+        usage_store.add_and_get("finance", current_month(), 25.0)
+        client, fixture = self._app(policy_store=policy_store, usage_store=usage_store)
+        manager_token = fixture.token(sub="mgr-1", tenant_id="finance", roles=["manager"])
+
+        resp = client.get("/v1/admin/usage", headers=auth_header(manager_token))
+
+        self.assertEqual(resp.status_code, 200)
+        tenant_ids = [t["tenant_id"] for t in resp.json()["tenants"]]
+        self.assertEqual(tenant_ids, ["finance"])
+
 
 if __name__ == "__main__":
     unittest.main()

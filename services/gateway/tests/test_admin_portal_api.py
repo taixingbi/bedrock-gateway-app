@@ -68,6 +68,19 @@ class ListTenantsTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 403)
 
+    def test_manager_sees_only_their_own_tenant(self):
+        policy_store = InMemoryPolicyStore(
+            {"finance": _policy(tenant_id="finance"), "sandbox": _policy(tenant_id="sandbox")}
+        )
+        client, fixture = _app(policy_store=policy_store)
+        manager_token = fixture.token(sub="mgr-1", tenant_id="finance", roles=["manager"])
+
+        resp = client.get("/v1/admin/tenants", headers=auth_header(manager_token))
+
+        self.assertEqual(resp.status_code, 200)
+        tenant_ids = [t["tenant_id"] for t in resp.json()["tenants"]]
+        self.assertEqual(tenant_ids, ["finance"])
+
 
 class ListRouteSetsTests(unittest.TestCase):
     def test_flags_uncertified_fallback(self):

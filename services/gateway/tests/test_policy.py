@@ -307,6 +307,38 @@ class AdminStateEndpointTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 403)
 
+    def test_manager_can_change_their_own_tenant_state(self):
+        """plan section 30: a tenant-scoped manager, unlike platform_admin,
+        may only act on the tenant they belong to."""
+        policy_store = InMemoryPolicyStore({"acme": _policy(tenant_id="acme")})
+        client, fixture = self._app(policy_store)
+        manager_token = fixture.token(sub="mgr-1", tenant_id="acme", roles=["manager"])
+
+        resp = client.put(
+            "/v1/admin/tenants/acme/state",
+            json={"state": "SUSPENDED"},
+            headers=auth_header(manager_token),
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(policy_store.get("acme").state, TenantState.SUSPENDED)
+
+    def test_manager_cannot_change_another_tenants_state(self):
+        policy_store = InMemoryPolicyStore(
+            {"acme": _policy(tenant_id="acme"), "other": _policy(tenant_id="other")}
+        )
+        client, fixture = self._app(policy_store)
+        manager_token = fixture.token(sub="mgr-1", tenant_id="acme", roles=["manager"])
+
+        resp = client.put(
+            "/v1/admin/tenants/other/state",
+            json={"state": "SUSPENDED"},
+            headers=auth_header(manager_token),
+        )
+
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(policy_store.get("other").state, TenantState.ACTIVE)  # unchanged
+
     def test_unknown_tenant_is_404(self):
         policy_store = InMemoryPolicyStore({})
         client, fixture = self._app(policy_store)

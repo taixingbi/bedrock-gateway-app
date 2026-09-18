@@ -13,7 +13,7 @@ machinery.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional, Set
+from typing import Callable, List, Optional, Set
 
 from .auth import rbac
 from .auth.aws_iam import IamTenantResolver
@@ -129,6 +129,26 @@ def authorize(identity: Identity, *, required_role: str) -> None:
     lacks the role required for this operation."""
     try:
         rbac.require_role(identity, required_role)
+    except AuthorizationError as exc:
+        raise PipelineError(403, exc.code, str(exc)) from exc
+
+
+def authorize_any(identity: Identity, *, required_roles: List[str]) -> None:
+    """Stage 1b variant: any one of several roles suffices -- e.g. an
+    admin endpoint reachable by either a tenant-scoped manager or a
+    global platform_admin (plan section 30)."""
+    try:
+        rbac.require_any_role(identity, *required_roles)
+    except AuthorizationError as exc:
+        raise PipelineError(403, exc.code, str(exc)) from exc
+
+
+def authorize_tenant_match(identity: Identity, resource_tenant_id: str, *, override_role: str) -> None:
+    """Stage 1b ABAC variant (plan section 30): the identity's own
+    tenant must own `resource_tenant_id`, unless it holds
+    `override_role` (bypasses tenant scoping entirely)."""
+    try:
+        rbac.require_tenant_match_or_role(identity, resource_tenant_id, override_role=override_role)
     except AuthorizationError as exc:
         raise PipelineError(403, exc.code, str(exc)) from exc
 
