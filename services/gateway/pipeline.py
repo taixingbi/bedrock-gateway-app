@@ -19,6 +19,7 @@ from .auth import rbac
 from .auth.aws_iam import IamTenantResolver
 from .auth.identity import AuthError, AuthorizationError, Identity, identity_from_claims
 from .auth.jwt_verifier import TokenVerifier
+from .concurrency import ConcurrencyLimiter
 from .guardrails.client import GuardrailClient
 from .guardrails.fail_closed import GuardrailUnavailableError, run_guardrail_check
 from .guardrails.models import GuardrailAction, GuardrailDecision
@@ -183,6 +184,24 @@ def enforce_rate_limit(policy: TenantPolicy, *, rate_limiter: TokenBucketRateLim
     if not rate_limiter.allow(policy.tenant_id, rpm_limit=effective_limit):
         raise PipelineError(
             429, "QUOTA_EXCEEDED", f"tenant '{policy.tenant_id}' exceeded its rate limit"
+        )
+
+
+def enforce_concurrency_limit(policy: TenantPolicy, *, concurrency_limiter: ConcurrencyLimiter) -> None:
+    """Stage 4c (plan section 16's concurrency fix): fast-reject, not
+    queue-and-wait -- raises PipelineError(429) immediately if the
+    tenant's or the global slot budget is exhausted. Distinct from
+    enforce_rate_limit: rpm_limit bounds request *rate*, this bounds how
+    many blocking calls (guardrail checks, Bedrock inference) may be
+    in flight for this tenant/globally at once.
+
+    Callers MUST release the acquired slot (concurrency_limiter.release
+    (policy.tenant_id)) once the guarded call finishes, success or
+    failure, or it leaks permanently -- this function only acquires."""
+    if not concurrency_limiter.try_acquire(policy.tenant_id, tenant_max=policy.max_concurrency):
+        raise PipelineError(
+            429, "CONCURRENCY_LIMIT_EXCEEDED",
+            f"tenant '{policy.tenant_id}' exceeded its concurrent-request limit, or the gateway is globally saturated",
         )
 
 

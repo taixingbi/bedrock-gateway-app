@@ -97,7 +97,15 @@ async def fire_concurrent(coro_factory: Callable[[int], Awaitable], n: int) -> L
 
 def default_tenant_policy(tenant_id: str, **overrides) -> TenantPolicy:
     defaults = dict(
-        tenant_id=tenant_id, state=TenantState.ACTIVE, rpm_limit=10_000, guardrail_policy="standard-v1"
+        tenant_id=tenant_id, state=TenantState.ACTIVE, rpm_limit=10_000, guardrail_policy="standard-v1",
+        # Generous by default for the same reason rpm_limit=10_000 is --
+        # most scenarios here fire deliberate concurrent bursts (10-30+
+        # requests) to test something else (kill switch, cache
+        # invalidation, guardrail fail-closed, ...), not plan section
+        # 16's per-tenant concurrency cap itself. A scenario that wants
+        # to exercise that cap overrides max_concurrency explicitly, same
+        # as tenant-a's tight rpm_limit=5 in the noisy-neighbor scenario.
+        max_concurrency=10_000,
     )
     defaults.update(overrides)
     return TenantPolicy(**defaults)

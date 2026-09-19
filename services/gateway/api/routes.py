@@ -30,6 +30,7 @@ from ..auth.aws_iam import IamTenantResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..cache.keys import build_cache_key, normalize_messages
 from ..cache.store import CachedResponse, ResponseCache
+from ..concurrency import BlockingCallRunner, BlockingCallTimeoutError, ConcurrencyLimiter
 from ..config import Settings
 from ..guardrails.client import GuardrailClient
 from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationError
@@ -73,9 +74,28 @@ def build_router(
     tracer: trace.Tracer,
     debug_capture_store: DebugCaptureStore,
     usage_store: UsageStore,
+    concurrency_limiter: ConcurrencyLimiter,
+    blocking_call_runner: BlockingCallRunner,
     audit_store: Optional[S3AuditStore] = None,
 ) -> APIRouter:
     api_router = APIRouter()
+
+    async def _run_blocking_limited(tenant_id: str, tenant_max, func, *args, **kwargs):
+        """Plan section 16's concurrency fix: acquire a fast-reject slot
+        (tenant + global), run `func` off the event loop with a total
+        timeout, always release the slot after -- whatever `func` itself
+        raises (guardrail BLOCK, BedrockInvocationError, ...) propagates
+        to the caller unchanged; this only adds admission control and
+        thread offload around it."""
+        if not concurrency_limiter.try_acquire(tenant_id, tenant_max=tenant_max):
+            raise pipeline.PipelineError(
+                429, "CONCURRENCY_LIMIT_EXCEEDED",
+                f"tenant '{tenant_id}' exceeded its concurrent-request limit, or the gateway is globally saturated",
+            )
+        try:
+            return await blocking_call_runner.run(func, *args, **kwargs)
+        finally:
+            concurrency_limiter.release(tenant_id)
 
     @api_router.get("/healthz")
     async def healthz() -> dict:
@@ -127,9 +147,21 @@ def build_router(
             combined_input_text = "\n".join(m.content for m in chat_request.messages)
             guardrail_start = time.perf_counter()
             try:
-                pipeline.check_input_guardrail(
-                    combined_input_text, policy=policy, guardrail_client=guardrail_client
+                await _run_blocking_limited(
+                    identity.tenant_id, policy.max_concurrency,
+                    pipeline.check_input_guardrail,
+                    combined_input_text, policy=policy, guardrail_client=guardrail_client,
                 )
+            except BlockingCallTimeoutError as exc:
+                guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
+                set_span_attributes(span, status=504, error=str(exc))
+                log_event(
+                    _chat_logger, "ERROR", "chat request failed",
+                    request_id=request_id, model=model_id, status=504,
+                    tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                    guardrail_latency_ms=guardrail_ms, error=str(exc),
+                )
+                return _error(504, "UPSTREAM_TIMEOUT", str(exc), request_id)
             except pipeline.PipelineError as exc:
                 guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
                 set_span_attributes(
@@ -245,7 +277,9 @@ def build_router(
 
             start = time.perf_counter()
             try:
-                routed = router.converse(
+                routed = await _run_blocking_limited(
+                    identity.tenant_id, policy.max_concurrency,
+                    router.converse,
                     primary_model_id=model_id,
                     route_set_name=policy.route_set,
                     messages=messages,
@@ -273,14 +307,50 @@ def build_router(
                     error=str(exc),
                 )
                 return _error(503, "ALL_ROUTES_UNAVAILABLE", str(exc), request_id)
+            except BlockingCallTimeoutError as exc:
+                set_span_attributes(span, status=504, error=str(exc))
+                log_event(
+                    _chat_logger, "ERROR", "chat request failed",
+                    request_id=request_id, model=model_id, status=504,
+                    tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                    latency_ms=round((time.perf_counter() - start) * 1000, 2),
+                    error=str(exc),
+                )
+                return _error(504, "UPSTREAM_TIMEOUT", str(exc), request_id)
+            except pipeline.PipelineError as exc:
+                set_span_attributes(span, status=exc.status_code, error=str(exc))
+                log_event(
+                    _chat_logger, "ERROR", "chat request failed",
+                    request_id=request_id, model=model_id, status=exc.status_code,
+                    tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                    latency_ms=round((time.perf_counter() - start) * 1000, 2),
+                    error=str(exc),
+                )
+                return _error(exc.status_code, exc.code, str(exc), request_id)
 
             result = routed.result
 
             guardrail_start = time.perf_counter()
             try:
-                pipeline.check_output_guardrail(
-                    result.text, policy=policy, guardrail_client=guardrail_client
+                await _run_blocking_limited(
+                    identity.tenant_id, policy.max_concurrency,
+                    pipeline.check_output_guardrail,
+                    result.text, policy=policy, guardrail_client=guardrail_client,
                 )
+            except BlockingCallTimeoutError as exc:
+                output_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
+                set_span_attributes(
+                    span, status=504, error=str(exc), model=routed.model_id,
+                    guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
+                )
+                log_event(
+                    _chat_logger, "ERROR", "chat request failed",
+                    request_id=request_id, model=routed.model_id, status=504,
+                    tenant_id=identity.tenant_id, policy_epoch=policy.policy_epoch,
+                    guardrail_latency_ms=round(input_guardrail_ms + output_guardrail_ms, 2),
+                    error=str(exc),
+                )
+                return _error(504, "UPSTREAM_TIMEOUT", str(exc), request_id)
             except pipeline.PipelineError as exc:
                 output_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
                 set_span_attributes(

@@ -35,6 +35,7 @@ from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .cache.store import InMemoryResponseCache, ResponseCache
 from .config import Settings, load_settings
 from .guardrails.basic_guardrail import BasicGuardrailClient
+from .concurrency import BlockingCallRunner, ConcurrencyLimiter
 from .guardrails.bedrock_guardrail import BedrockGuardrailClient
 from .guardrails.client import GuardrailClient
 from .inference.bedrock_client import BedrockClient, ConverseClient
@@ -91,6 +92,8 @@ def create_app(
     circuit_breaker: Optional[CircuitBreaker] = None,
     route_sets: Optional[Dict[str, RouteSet]] = None,
     tracer: Optional[trace.Tracer] = None,
+    concurrency_limiter: Optional[ConcurrencyLimiter] = None,
+    blocking_call_runner: Optional[BlockingCallRunner] = None,
     debug_capture_store: Optional[DebugCaptureStore] = None,
     audit_store: Optional[S3AuditStore] = None,
     iam_tenant_resolver: Optional[IamTenantResolver] = None,
@@ -168,6 +171,16 @@ def create_app(
             if settings.bedrock_guardrail_id
             else BasicGuardrailClient()
         )
+    if concurrency_limiter is None:
+        concurrency_limiter = ConcurrencyLimiter(
+            global_max=settings.concurrency_global_max,
+            default_tenant_max=settings.concurrency_default_tenant_max,
+        )
+    if blocking_call_runner is None:
+        blocking_call_runner = BlockingCallRunner(
+            max_workers=settings.blocking_call_thread_pool_size,
+            default_timeout_s=settings.blocking_call_timeout_s,
+        )
     if response_cache is None:
         response_cache = InMemoryResponseCache(
             ttl_s=settings.response_cache_ttl_s, max_entries=settings.response_cache_max_entries
@@ -242,6 +255,8 @@ def create_app(
         response_cache=response_cache,
         circuit_breaker=circuit_breaker,
         tracer=tracer,
+        concurrency_limiter=concurrency_limiter,
+        blocking_call_runner=blocking_call_runner,
         debug_capture_store=debug_capture_store,
         usage_store=usage_store,
         audit_store=audit_store,

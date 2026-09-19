@@ -94,6 +94,21 @@ class Settings:
     bedrock_guardrail_id: str
     bedrock_guardrail_version: str
 
+    # Plan section 16's concurrency fix (concurrency.py) -- this
+    # deployment runs uvicorn with its default single worker, so a
+    # blocking boto3 call made directly from an async handler blocks
+    # every other tenant's concurrent request on the same process.
+    # global_max should not exceed thread_pool_size, or admitted
+    # requests would still queue for a free thread rather than being
+    # fast-rejected at the limiter.
+    concurrency_global_max: int
+    concurrency_default_tenant_max: int
+    blocking_call_thread_pool_size: int
+    # Bounds how long a request waits for a blocking call, not how long
+    # the call's own thread keeps running (Python threads can't be
+    # forcibly cancelled) -- see concurrency.py's BlockingCallRunner.
+    blocking_call_timeout_s: float
+
     # M7 async jobs -- both empty by default (in-memory JobStore/JobQueue
     # instead of the real DynamoDB/SQS-backed ones, see main.py). Set in
     # every environment that has bedrock-gateway-infra's jobs queue/table
@@ -173,6 +188,10 @@ def load_settings() -> Settings:
         audit_bucket_name=os.environ.get("AUDIT_BUCKET_NAME", ""),
         bedrock_guardrail_id=os.environ.get("BEDROCK_GUARDRAIL_ID", ""),
         bedrock_guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT"),
+        concurrency_global_max=_env_int("CONCURRENCY_GLOBAL_MAX", 32),
+        concurrency_default_tenant_max=_env_int("CONCURRENCY_DEFAULT_TENANT_MAX", 8),
+        blocking_call_thread_pool_size=_env_int("BLOCKING_CALL_THREAD_POOL_SIZE", 32),
+        blocking_call_timeout_s=_env_float("BLOCKING_CALL_TIMEOUT_S", 60.0),
         jobs_queue_url=os.environ.get("JOBS_QUEUE_URL", ""),
         jobs_table_name=os.environ.get("JOBS_TABLE_NAME", ""),
         usage_table_name=os.environ.get("USAGE_TABLE_NAME", ""),

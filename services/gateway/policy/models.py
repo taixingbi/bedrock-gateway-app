@@ -56,6 +56,13 @@ class TenantPolicy:
     # this field is stored per-object for a future per-tenant lifecycle
     # rule, but nothing currently deletes an object early because of it.
     debug_capture_retention_days: Optional[int] = None
+    # Plan section 16's concurrency fix: max simultaneous in-flight
+    # blocking calls (guardrail checks, Bedrock inference) this tenant
+    # may hold at once -- distinct from rpm_limit, which bounds request
+    # *rate*, not how many are concurrently in progress. None means
+    # Settings.concurrency_default_tenant_max applies (see
+    # concurrency.py, pipeline.enforce_concurrency_limit).
+    max_concurrency: Optional[int] = None
     # M8: hard limit on estimated spend per calendar month (see
     # usage/store.py). None means unlimited -- most tenants don't need
     # one for a V1 MVP; budget enforcement is opt-in per tenant.

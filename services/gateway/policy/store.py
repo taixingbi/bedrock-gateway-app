@@ -112,6 +112,9 @@ def load_policies_from_yaml(path: str) -> InMemoryPolicyStore:
                 if cfg.get("debug_capture_retention_days") is not None
                 else None
             ),
+            max_concurrency=(
+                int(cfg["max_concurrency"]) if cfg.get("max_concurrency") is not None else None
+            ),
             monthly_budget=(
                 float(cfg["monthly_budget"]) if cfg.get("monthly_budget") is not None else None
             ),
@@ -155,6 +158,8 @@ def _policy_to_item(policy: TenantPolicy) -> Dict[str, Any]:
         item["monthly_budget"] = Decimal(str(policy.monthly_budget))
     if policy.debug_capture_retention_days is not None:
         item["debug_capture_retention_days"] = policy.debug_capture_retention_days
+    if policy.max_concurrency is not None:
+        item["max_concurrency"] = policy.max_concurrency
     return item
 
 
@@ -175,6 +180,7 @@ def _item_to_policy(item: Dict[str, Any]) -> TenantPolicy:
         debug_capture_retention_days=(
             int(item["debug_capture_retention_days"]) if "debug_capture_retention_days" in item else None
         ),
+        max_concurrency=int(item["max_concurrency"]) if "max_concurrency" in item else None,
         monthly_budget=float(item["monthly_budget"]) if "monthly_budget" in item else None,
     )
 

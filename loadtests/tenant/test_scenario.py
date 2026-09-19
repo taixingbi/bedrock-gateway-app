@@ -25,7 +25,16 @@ class NoisyNeighborScenarioTests(unittest.IsolatedAsyncioTestCase):
         scenario = build_scenario_app(
             tenants={
                 "tenant-a": default_tenant_policy("tenant-a", rpm_limit=5),
-                "tenant-b": default_tenant_policy("tenant-b", rpm_limit=10_000),
+                # max_concurrency=50, not just a generous rpm_limit: plan
+                # section 16's concurrency fix added a second, independent
+                # per-tenant cap (in-flight requests, not request rate) --
+                # this scenario fires 30 truly simultaneous tenant-b
+                # requests, which the concurrency_default_tenant_max=8
+                # default would otherwise legitimately throttle on its own,
+                # unrelated to tenant-a's burst. Set explicitly high here
+                # for the same reason rpm_limit already is: proving
+                # isolation, not exercising this tenant's own limits.
+                "tenant-b": default_tenant_policy("tenant-b", rpm_limit=10_000, max_concurrency=50),
             },
             converse_client=fake,
             guardrail_client=AlwaysAllowGuardrailClient(),
@@ -42,8 +51,20 @@ class NoisyNeighborScenarioTests(unittest.IsolatedAsyncioTestCase):
             return await asyncio.gather(*(make_request(tenant_id) for _ in range(n)))
 
         try:
+            # 10 + 10, not 30 + 30: deliberately under Settings.
+            # concurrency_global_max's default (32) -- plan section 16's
+            # concurrency fix added a *shared* global cap alongside the
+            # per-tenant one, and a shared resource is, by construction,
+            # not fully isolable (same tension the SLO paper -- plan
+            # section 31.5 -- flags for adaptive capacity estimation: a
+            # global loop can legitimately let one tenant's load affect
+            # another's through the shared ceiling, even with unlimited
+            # per-tenant headroom). That's a real, separate concern from
+            # what THIS test demonstrates -- rate-limit isolation, not
+            # global-concurrency isolation -- so the burst here stays
+            # small enough to not exercise that other boundary at all.
             results_a, results_b = await asyncio.gather(
-                fire_for("tenant-a", 30), fire_for("tenant-b", 30)
+                fire_for("tenant-a", 10), fire_for("tenant-b", 10)
             )
         finally:
             await scenario.aclose()
