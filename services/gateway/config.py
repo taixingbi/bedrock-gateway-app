@@ -99,6 +99,12 @@ class Settings:
     # empty means disabled, same "empty string = off" convention as
     # jobs_queue_url/jobs_table_name below.
     audit_bucket_name: str
+    # Plan section 34.4 -- SEPARATE bucket from audit_bucket_name
+    # above: this one is metadata-only (no prompt/response text) and
+    # always-on, not opt-in via debug_capture_enabled. Empty disables
+    # it -- request_audit_store falls back to an in-memory store
+    # (see main.py), same "empty string = off" convention.
+    request_audit_bucket_name: str
     # BedrockGuardrailClient -- empty guardrail_id means disabled,
     # falls back to BasicGuardrailClient (see main.py). Version isn't
     # given its own "off" default since it's meaningless without an id.
@@ -209,6 +215,7 @@ def load_settings() -> Settings:
         otel_exporter_otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         debug_capture_ttl_s=_env_float("DEBUG_CAPTURE_TTL_S", 900.0),
         audit_bucket_name=os.environ.get("AUDIT_BUCKET_NAME", ""),
+        request_audit_bucket_name=os.environ.get("REQUEST_AUDIT_BUCKET_NAME", ""),
         bedrock_guardrail_id=os.environ.get("BEDROCK_GUARDRAIL_ID", ""),
         bedrock_guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT"),
         concurrency_global_max=_env_int("CONCURRENCY_GLOBAL_MAX", 32),

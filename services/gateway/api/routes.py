@@ -45,6 +45,7 @@ from ..telemetry.cost import estimate_cost
 from ..telemetry.debug_capture import DebugCaptureStore, S3AuditStore
 from ..telemetry.logging import get_logger, log_event
 from ..telemetry.otel import set_span_attributes
+from ..telemetry.request_audit import RequestAuditEvent, RequestAuditStore, current_trace_id
 from ..telemetry.slo import slo_breached
 from ..usage.store import UsageStore, add_and_get_application, current_day, current_month
 from .errors import error_response as _error
@@ -81,6 +82,7 @@ def build_router(
     audit_store: Optional[S3AuditStore] = None,
     enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
     model_registry: Optional[Dict[str, ModelRegistryEntry]] = None,
+    request_audit_store: Optional[RequestAuditStore] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -109,6 +111,51 @@ def build_router(
         usage_store.add_and_get(tenant_id, current_month(), cost)
         usage_store.add_and_get(tenant_id, current_day(), cost)
         add_and_get_application(usage_store, tenant_id, application_id, current_month(), cost)
+
+    def _write_audit(
+        *,
+        request_id: str,
+        identity,
+        action: str,
+        status: int,
+        model: Optional[str] = None,
+        policy_version: Optional[int] = None,
+        authz_decision: Optional[str] = None,
+        decision_id: Optional[str] = None,
+        guardrail_version: Optional[str] = None,
+        guardrail_action: Optional[str] = None,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        estimated_cost: Optional[float] = None,
+    ) -> None:
+        """Plan section 34.4: one durable, metadata-only record per
+        request -- see telemetry/request_audit.py's module docstring
+        for why this is safe to write unconditionally (no-op if
+        request_audit_store isn't configured, same optional-infra
+        pattern audit_store/S3AuditStore already use)."""
+        if request_audit_store is None:
+            return
+        request_audit_store.write(
+            RequestAuditEvent(
+                request_id=request_id,
+                tenant_id=identity.tenant_id,
+                application_id=identity.application_id,
+                principal=identity.sub,
+                action=action,
+                status=status,
+                trace_id=current_trace_id(),
+                model=model,
+                policy_version=policy_version,
+                authz_decision=authz_decision,
+                decision_id=decision_id,
+                guardrail_version=guardrail_version,
+                guardrail_action=guardrail_action,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost=estimated_cost,
+                timestamp=time.time(),
+            )
+        )
 
     @api_router.get("/healthz")
     async def healthz() -> dict:
@@ -154,6 +201,11 @@ def build_router(
                     _chat_logger, "INFO", "request rejected by admission control",
                     request_id=request_id, tenant_id=identity.tenant_id,
                     stage=admission.stage, code=exc.code, priority_class=policy.priority_class,
+                )
+                _write_audit(
+                    request_id=request_id, identity=identity, action="chat.completion",
+                    status=exc.status_code, policy_version=policy.policy_epoch,
+                    authz_decision="DENY",
                 )
                 return _error(exc.status_code, exc.code, str(exc), request_id)
             if admission.warning:
@@ -219,6 +271,12 @@ def build_router(
                     guardrail_version=policy.guardrail_policy, guardrail_action="BLOCK",
                     guardrail_latency_ms=guardrail_ms,
                     blocked_reason=str(exc), error=str(exc),
+                )
+                _write_audit(
+                    request_id=request_id, identity=identity, action="chat.completion",
+                    status=exc.status_code, model=model_id, policy_version=policy.policy_epoch,
+                    authz_decision="ALLOW",  # authz allowed the request through; the guardrail blocked it
+                    guardrail_version=policy.guardrail_policy, guardrail_action="BLOCK",
                 )
                 return _error(exc.status_code, exc.code, str(exc), request_id)
             input_guardrail_ms = round((time.perf_counter() - guardrail_start) * 1000, 2)
@@ -305,6 +363,13 @@ def build_router(
                     guardrail_latency_ms=input_guardrail_ms, ttft_ms=None, latency_ms=0.0,
                     retry_count=0, fallback=False, cache_hit=True,
                     estimated_cost=estimated_cost, slo_breach=False, status=200,
+                )
+                _write_audit(
+                    request_id=request_id, identity=identity, action="chat.completion", status=200,
+                    model=cached.model_id, policy_version=policy.policy_epoch, authz_decision="ALLOW",
+                    guardrail_version=policy.guardrail_policy, guardrail_action="ALLOW",
+                    input_tokens=cached.input_tokens, output_tokens=cached.output_tokens,
+                    estimated_cost=estimated_cost,
                 )
                 response = ChatResponse(
                     request_id=request_id,
@@ -475,6 +540,13 @@ def build_router(
                 estimated_cost=estimated_cost,
                 slo_breach=breached,
                 status=200,
+            )
+            _write_audit(
+                request_id=request_id, identity=identity, action="chat.completion", status=200,
+                model=routed.model_id, policy_version=policy.policy_epoch, authz_decision="ALLOW",
+                guardrail_version=policy.guardrail_policy, guardrail_action="ALLOW",
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                estimated_cost=estimated_cost,
             )
 
             response = ChatResponse(

@@ -61,6 +61,7 @@ from .routing.model_registry import ModelRegistryEntry, load_model_registry_from
 from .routing.circuit_breaker import CircuitBreaker
 from .routing.router import CertifiedRouter, RouteSet, load_route_sets_from_yaml
 from .telemetry.debug_capture import DebugCaptureStore, S3AuditStore
+from .telemetry.request_audit import InMemoryRequestAuditStore, RequestAuditStore, S3RequestAuditStore
 from .telemetry.logging import configure_logging, get_logger, log_event
 from .telemetry.middleware import RequestContextMiddleware
 from .telemetry.otel import configure_tracing
@@ -111,6 +112,7 @@ def create_app(
     policy_change_store: Optional[PolicyChangeStore] = None,
     enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
     model_registry: Optional[Dict[str, ModelRegistryEntry]] = None,
+    request_audit_store: Optional[RequestAuditStore] = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(
@@ -206,6 +208,12 @@ def create_app(
         )
     if model_registry is None:
         model_registry = load_model_registry_from_yaml(settings.model_registry_path)
+    if request_audit_store is None:
+        request_audit_store = (
+            S3RequestAuditStore(bucket=settings.request_audit_bucket_name, region=settings.aws_region)
+            if settings.request_audit_bucket_name
+            else InMemoryRequestAuditStore()
+        )
 
     policy_cache = PolicySnapshotCache(store=policy_store, ttl_s=settings.policy_cache_ttl_s)
     rate_limiter = TokenBucketRateLimiter()
@@ -284,6 +292,7 @@ def create_app(
         audit_store=audit_store,
         enterprise_group_resolver=enterprise_group_resolver,
         model_registry=model_registry,
+        request_audit_store=request_audit_store,
     )
     admin_router = build_admin_router(
         policy_store=policy_store,
