@@ -66,6 +66,11 @@ class Settings:
     # require_tenant_match_or_role().
     manager_required_role: str
     iam_tenants_path: str  # AWS_IAM/SigV4 auth path -- see auth/aws_iam.py
+    # Plan section 34.2: real enterprise IdP (Okta/Entra ID) `groups`
+    # claim -> tenant_id/application_id/roles. Empty means no mapping
+    # configured, so a token with only a `groups` claim (no direct
+    # tenant_id) 401s -- see auth/enterprise_groups.py.
+    enterprise_groups_path: str
 
     # M2 policy plane
     tenant_policy_path: str
@@ -185,6 +190,7 @@ def load_settings() -> Settings:
         admin_required_role=os.environ.get("ADMIN_REQUIRED_ROLE", "platform_admin"),
         manager_required_role=os.environ.get("MANAGER_REQUIRED_ROLE", "manager"),
         iam_tenants_path=os.environ.get("IAM_TENANTS_PATH", "policies/iam_tenants.yaml"),
+        enterprise_groups_path=os.environ.get("ENTERPRISE_GROUPS_PATH", ""),
         tenant_policy_path=os.environ.get("TENANT_POLICY_PATH", "policies/tenants.yaml"),
         policy_cache_ttl_s=_env_float("POLICY_CACHE_TTL_S", 30.0),
         certified_models_path=os.environ.get("CERTIFIED_MODELS_PATH", "policies/certified_models.yaml"),

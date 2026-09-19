@@ -7,6 +7,7 @@ independently of tenant state control / usage reporting.
 from __future__ import annotations
 
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
@@ -14,6 +15,7 @@ from starlette.responses import JSONResponse
 from .. import pipeline
 from ..auth import aws_iam
 from ..auth.aws_iam import IamTenantResolver, ProvisionedIamTenantResolver
+from ..auth.enterprise_groups import EnterpriseGroupResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
 from ..onboarding.audit import AuditEvent, AuditStore
@@ -44,6 +46,7 @@ def build_onboarding_router(
     iam_tenant_resolver_primary: ProvisionedIamTenantResolver,
     settings: Settings,
     token_verifier: TokenVerifier,
+    enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -54,6 +57,7 @@ def build_onboarding_router(
             iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
             iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
             iam_tenant_resolver=iam_tenant_resolver,
+            enterprise_group_resolver=enterprise_group_resolver,
         )
         pipeline.authorize(identity, required_role=required_role)
         return identity

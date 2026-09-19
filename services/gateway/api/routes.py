@@ -27,6 +27,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from .. import pipeline
 from ..auth import aws_iam
 from ..auth.aws_iam import IamTenantResolver
+from ..auth.enterprise_groups import EnterpriseGroupResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..cache.keys import build_cache_key, normalize_messages
 from ..cache.store import CachedResponse, ResponseCache
@@ -77,6 +78,7 @@ def build_router(
     concurrency_limiter: ConcurrencyLimiter,
     blocking_call_runner: BlockingCallRunner,
     audit_store: Optional[S3AuditStore] = None,
+    enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -118,6 +120,7 @@ def build_router(
                     iam_tenant_resolver=iam_tenant_resolver,
                     request_id=request_id,
                     session_id=session_id or None,
+                    enterprise_group_resolver=enterprise_group_resolver,
                 )
                 pipeline.authorize(identity, required_role=settings.chat_required_role)
                 policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)

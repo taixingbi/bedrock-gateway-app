@@ -9,7 +9,7 @@ updates in later milestones) without touching the chat pipeline.
 from __future__ import annotations
 
 import uuid
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from .. import pipeline
 from ..auth import aws_iam
 from ..auth.aws_iam import IamTenantResolver
+from ..auth.enterprise_groups import EnterpriseGroupResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
 from ..onboarding.audit import AuditEvent, AuditStore
@@ -63,6 +64,7 @@ def build_admin_router(
     policy_store_primary: ProvisionedPolicyStore,
     policy_change_store: PolicyChangeStore,
     audit_store: AuditStore,
+    enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -77,6 +79,7 @@ def build_admin_router(
             iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
             iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
             iam_tenant_resolver=iam_tenant_resolver,
+            enterprise_group_resolver=enterprise_group_resolver,
         )
         pipeline.authorize(identity, required_role=settings.admin_required_role)
         return identity
@@ -94,6 +97,7 @@ def build_admin_router(
             iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
             iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
             iam_tenant_resolver=iam_tenant_resolver,
+            enterprise_group_resolver=enterprise_group_resolver,
         )
         pipeline.authorize_any(
             identity, required_roles=[settings.admin_required_role, settings.manager_required_role]
@@ -106,7 +110,9 @@ def build_admin_router(
 
         try:
             identity = _authenticate_admin_or_manager(request)
-            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+            pipeline.authorize_tenant_match(
+                identity, tenant_id, override_role=settings.admin_required_role, action="tenant.state.write"
+            )
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -285,7 +291,10 @@ def build_admin_router(
 
         try:
             identity = _authenticate_admin_or_manager(request)
-            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+            pipeline.authorize_tenant_match(
+                identity, tenant_id, override_role=settings.admin_required_role,
+                action="policy.change.propose",
+            )
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -324,7 +333,10 @@ def build_admin_router(
 
         try:
             identity = _authenticate_admin_or_manager(request)
-            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+            pipeline.authorize_tenant_match(
+                identity, tenant_id, override_role=settings.admin_required_role,
+                action="policy.change.list",
+            )
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 
@@ -453,7 +465,10 @@ def build_admin_router(
 
         try:
             identity = _authenticate_admin_or_manager(request)
-            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+            pipeline.authorize_tenant_match(
+                identity, tenant_id, override_role=settings.admin_required_role,
+                action="policy.history.read",
+            )
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 

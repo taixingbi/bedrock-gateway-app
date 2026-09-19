@@ -31,6 +31,7 @@ from .auth.aws_iam import (
     ProvisionedIamTenantResolver,
 )
 from .auth.devkeys import load_or_create_dev_keypair
+from .auth.enterprise_groups import EnterpriseGroupResolver, FileEnterpriseGroupResolver
 from .auth.jwt_verifier import JwksVerifier, StaticKeyVerifier, TokenVerifier
 from .cache.store import InMemoryResponseCache, ResponseCache
 from .config import Settings, load_settings
@@ -107,6 +108,7 @@ def create_app(
     policy_store_primary: Optional[ProvisionedPolicyStore] = None,
     iam_tenant_resolver_primary: Optional[ProvisionedIamTenantResolver] = None,
     policy_change_store: Optional[PolicyChangeStore] = None,
+    enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(
@@ -247,6 +249,8 @@ def create_app(
             if settings.onboarding_audit_table_name
             else InMemoryAuditStore()
         )
+    if enterprise_group_resolver is None:
+        enterprise_group_resolver = FileEnterpriseGroupResolver(settings.enterprise_groups_path)
     if policy_change_store is None:
         # Reuses the onboarding audit table's DynamoDbAuditStore shape
         # for its own event trail (see admin_routes.py's AuditEvent
@@ -274,6 +278,7 @@ def create_app(
         debug_capture_store=debug_capture_store,
         usage_store=usage_store,
         audit_store=audit_store,
+        enterprise_group_resolver=enterprise_group_resolver,
     )
     admin_router = build_admin_router(
         policy_store=policy_store,
@@ -287,6 +292,7 @@ def create_app(
         policy_store_primary=policy_store_primary,
         policy_change_store=policy_change_store,
         audit_store=onboarding_audit_store,
+        enterprise_group_resolver=enterprise_group_resolver,
     )
     jobs_router = build_jobs_router(
         settings=settings,
@@ -299,6 +305,7 @@ def create_app(
         job_queue=job_queue,
         usage_store=usage_store,
         certified_model_ids=certified_model_ids,
+        enterprise_group_resolver=enterprise_group_resolver,
     )
     onboarding_router = build_onboarding_router(
         onboarding_store=onboarding_store,
@@ -309,6 +316,7 @@ def create_app(
         iam_tenant_resolver_primary=iam_tenant_resolver_primary,
         settings=settings,
         token_verifier=token_verifier,
+        enterprise_group_resolver=enterprise_group_resolver,
     )
 
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:

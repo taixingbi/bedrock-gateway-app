@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Set
+from typing import Optional, Set
 
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from .. import pipeline
 from ..auth import aws_iam
 from ..auth.aws_iam import IamTenantResolver
+from ..auth.enterprise_groups import EnterpriseGroupResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
 from ..guardrails.client import GuardrailClient
@@ -49,6 +50,7 @@ def build_jobs_router(
     job_queue: JobQueue,
     usage_store: UsageStore,
     certified_model_ids: Set[str],
+    enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -59,6 +61,7 @@ def build_jobs_router(
             iam_principal_arn=request.headers.get(aws_iam.HEADER_PRINCIPAL_ARN),
             iam_account_id=request.headers.get(aws_iam.HEADER_ACCOUNT_ID),
             iam_tenant_resolver=iam_tenant_resolver,
+            enterprise_group_resolver=enterprise_group_resolver,
         )
 
     @api_router.post("/v1/jobs", status_code=202, response_model=JobResponse)

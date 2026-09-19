@@ -18,7 +18,10 @@ client can never set them directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from .enterprise_groups import EnterpriseGroupResolver
 
 
 class AuthError(Exception):
@@ -54,7 +57,9 @@ class Identity:
         return role in self.roles
 
 
-def identity_from_claims(claims: dict) -> Identity:
+def identity_from_claims(
+    claims: dict, *, enterprise_group_resolver: Optional["EnterpriseGroupResolver"] = None
+) -> Identity:
     """Build an Identity from verified JWT claims.
 
     Raises AuthError if a required claim is missing -- a token that
@@ -62,7 +67,7 @@ def identity_from_claims(claims: dict) -> Identity:
     useless (and dangerous) here, since tenant resolution has nowhere
     else to fall back to (see module docstring).
 
-    Two claim shapes are accepted, checked in this order:
+    Three claim shapes are accepted, checked in this order:
       - Plain `tenant_id`/`application_id`/`roles` -- what
         auth/devkeys.py's mint_dev_token() produces, and the only
         shape before a real IdP existed.
@@ -72,6 +77,12 @@ def identity_from_claims(claims: dict) -> Identity:
         claim from native Cognito group membership, not something we
         had to invent a custom attribute for -- Cognito custom
         attributes can't be arrays at all, only groups can).
+      - A real enterprise IdP's (Okta/Entra ID) `groups` claim (plan
+        section 34.2) -- only tried when neither of the above supplied
+        a tenant_id AND `enterprise_group_resolver` is configured
+        (see auth/enterprise_groups.py). Each matched group maps to
+        this platform's own tenant_id/application_id/roles; ambiguity
+        across groups is a hard error, not a silent pick.
     """
     sub = claims.get("sub")
     tenant_id = claims.get("tenant_id") or claims.get("custom:tenant_id")
@@ -79,6 +90,14 @@ def identity_from_claims(claims: dict) -> Identity:
     roles = claims.get("roles")
     if roles is None:
         roles = claims.get("cognito:groups") or []
+
+    if not tenant_id and enterprise_group_resolver is not None:
+        idp_groups = claims.get("groups")
+        if isinstance(idp_groups, list) and idp_groups:
+            resolved = enterprise_group_resolver.resolve(idp_groups)
+            tenant_id = resolved.tenant_id
+            application_id = resolved.application_id
+            roles = resolved.roles
 
     missing = [
         name

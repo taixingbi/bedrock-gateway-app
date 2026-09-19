@@ -15,10 +15,11 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional, Set
 
-from .auth import rbac
 from .auth.aws_iam import IamTenantResolver
-from .auth.identity import AuthError, AuthorizationError, Identity, identity_from_claims
+from .auth.enterprise_groups import EnterpriseGroupResolver
+from .auth.identity import AuthError, Identity, identity_from_claims
 from .auth.jwt_verifier import TokenVerifier
+from .authz.decision import Decision, decide
 from .concurrency import ConcurrencyLimiter
 from .guardrails.client import GuardrailClient
 from .guardrails.fail_closed import GuardrailUnavailableError, run_guardrail_check
@@ -86,6 +87,7 @@ def authenticate(
     iam_tenant_resolver: Optional[IamTenantResolver] = None,
     request_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
 ) -> Identity:
     """Stage 1: Auth. Derives an Identity from whichever verified source
     the request arrived through.
@@ -96,7 +98,10 @@ def authenticate(
     Otherwise, falls back to the existing JWT path: tenant_id always
     comes from the verified token's claims, never a request-supplied
     header (e.g. X-Tenant-ID), so a caller cannot claim a tenant it
-    doesn't hold a token for.
+    doesn't hold a token for. `enterprise_group_resolver` (plan section
+    34.2), when configured, lets a real enterprise IdP's `groups` claim
+    resolve to tenant_id/application_id/roles -- see
+    auth/identity.py's identity_from_claims for the precedence order.
     """
     if iam_principal_arn:
         if iam_tenant_resolver is None:
@@ -118,40 +123,48 @@ def authenticate(
 
     try:
         claims = token_verifier.verify(token)
-        identity = identity_from_claims(claims)
+        identity = identity_from_claims(claims, enterprise_group_resolver=enterprise_group_resolver)
     except AuthError as exc:
         raise PipelineError(401, exc.code, str(exc)) from exc
 
     return identity
 
 
-def authorize(identity: Identity, *, required_role: str) -> None:
+def authorize(identity: Identity, *, required_role: str, action: str = "unspecified") -> Decision:
     """Stage 1b: RBAC. Raises PipelineError(403, ...) if the identity
-    lacks the role required for this operation."""
-    try:
-        rbac.require_role(identity, required_role)
-    except AuthorizationError as exc:
-        raise PipelineError(403, exc.code, str(exc)) from exc
+    lacks the role required for this operation. Returns the PDP
+    Decision (plan section 34.3) on success, so a caller that wants to
+    thread decision_id/policy_version into the audit event can."""
+    decision = decide(identity, action=action, required_role=required_role)
+    if not decision.allow:
+        raise PipelineError(403, decision.code, decision.reason)
+    return decision
 
 
-def authorize_any(identity: Identity, *, required_roles: List[str]) -> None:
+def authorize_any(identity: Identity, *, required_roles: List[str], action: str = "unspecified") -> Decision:
     """Stage 1b variant: any one of several roles suffices -- e.g. an
     admin endpoint reachable by either a tenant-scoped manager or a
     global platform_admin (plan section 30)."""
-    try:
-        rbac.require_any_role(identity, *required_roles)
-    except AuthorizationError as exc:
-        raise PipelineError(403, exc.code, str(exc)) from exc
+    decision = decide(identity, action=action, required_roles=required_roles)
+    if not decision.allow:
+        raise PipelineError(403, decision.code, decision.reason)
+    return decision
 
 
-def authorize_tenant_match(identity: Identity, resource_tenant_id: str, *, override_role: str) -> None:
+def authorize_tenant_match(
+    identity: Identity, resource_tenant_id: str, *, override_role: str, action: str = "unspecified",
+    policy_version: Optional[int] = None,
+) -> Decision:
     """Stage 1b ABAC variant (plan section 30): the identity's own
     tenant must own `resource_tenant_id`, unless it holds
     `override_role` (bypasses tenant scoping entirely)."""
-    try:
-        rbac.require_tenant_match_or_role(identity, resource_tenant_id, override_role=override_role)
-    except AuthorizationError as exc:
-        raise PipelineError(403, exc.code, str(exc)) from exc
+    decision = decide(
+        identity, action=action, resource_tenant_id=resource_tenant_id, override_role=override_role,
+        policy_version=policy_version,
+    )
+    if not decision.allow:
+        raise PipelineError(403, decision.code, decision.reason)
+    return decision
 
 
 def resolve_policy(identity: Identity, *, policy_cache: PolicySnapshotCache) -> TenantPolicy:
