@@ -46,7 +46,7 @@ from ..telemetry.debug_capture import DebugCaptureStore, S3AuditStore
 from ..telemetry.logging import get_logger, log_event
 from ..telemetry.otel import set_span_attributes
 from ..telemetry.slo import slo_breached
-from ..usage.store import UsageStore, current_month
+from ..usage.store import UsageStore, add_and_get_application, current_day, current_month
 from .errors import error_response as _error
 from .schemas import ChatRequest, ChatResponse, Usage
 
@@ -101,6 +101,15 @@ def build_router(
         finally:
             concurrency_limiter.release(tenant_id)
 
+    def _record_usage(tenant_id: str, application_id: str, cost: float) -> None:
+        """Plan section 34.7: records spend at the tenant-monthly level
+        (M8, unchanged), tenant-daily, and per-application level (both
+        new) -- see usage/store.py's add_and_get_application/
+        current_day for why this needs no new store/table."""
+        usage_store.add_and_get(tenant_id, current_month(), cost)
+        usage_store.add_and_get(tenant_id, current_day(), cost)
+        add_and_get_application(usage_store, tenant_id, application_id, current_month(), cost)
+
     @api_router.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
@@ -126,12 +135,32 @@ def build_router(
                 )
                 pipeline.authorize(identity, required_role=settings.chat_required_role)
                 policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)
-                pipeline.enforce_kill_switch(policy)
-                pipeline.enforce_rate_limit(policy, rate_limiter=rate_limiter)
-                pipeline.enforce_budget(policy, usage_store=usage_store, month=current_month())
             except pipeline.PipelineError as exc:
                 set_span_attributes(span, status=exc.status_code, error=str(exc))
                 return _error(exc.status_code, exc.code, str(exc), request_id)
+
+            # Plan section 34.6: kill-switch + rate-limit + budget as
+            # one reported decision instead of three separate calls --
+            # concurrency (stage 4c) is acquired later, per-blocking-
+            # call, not here (see admission_decision's docstring).
+            admission = pipeline.admission_decision(
+                policy, rate_limiter=rate_limiter, usage_store=usage_store,
+                month=current_month(), day=current_day(), application_id=identity.application_id,
+            )
+            if not admission.allowed:
+                exc = admission.error
+                set_span_attributes(span, status=exc.status_code, error=str(exc))
+                log_event(
+                    _chat_logger, "INFO", "request rejected by admission control",
+                    request_id=request_id, tenant_id=identity.tenant_id,
+                    stage=admission.stage, code=exc.code, priority_class=policy.priority_class,
+                )
+                return _error(exc.status_code, exc.code, str(exc), request_id)
+            if admission.warning:
+                log_event(
+                    _chat_logger, "WARNING", "budget soft warning",
+                    request_id=request_id, tenant_id=identity.tenant_id, warning=admission.warning,
+                )
 
             set_span_attributes(
                 span, tenant_id=identity.tenant_id, application_id=identity.application_id,
@@ -244,7 +273,7 @@ def build_router(
                 estimated_cost = estimate_cost(
                     cached.model_id, input_tokens=cached.input_tokens, output_tokens=cached.output_tokens
                 )
-                usage_store.add_and_get(identity.tenant_id, current_month(), estimated_cost)
+                _record_usage(identity.tenant_id, identity.application_id, estimated_cost)
                 payload_ref = None
                 if policy.debug_capture_enabled:
                     debug_capture_store.capture(
@@ -412,7 +441,7 @@ def build_router(
             estimated_cost = estimate_cost(
                 routed.model_id, input_tokens=result.input_tokens, output_tokens=result.output_tokens
             )
-            usage_store.add_and_get(identity.tenant_id, current_month(), estimated_cost)
+            _record_usage(identity.tenant_id, identity.application_id, estimated_cost)
             breached = slo_breached(policy, result.latency_ms)
 
             set_span_attributes(

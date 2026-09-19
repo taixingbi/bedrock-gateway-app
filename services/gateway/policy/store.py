@@ -200,6 +200,18 @@ def load_policies_from_yaml(path: str) -> InMemoryPolicyStore:
                 float(cfg["monthly_budget"]) if cfg.get("monthly_budget") is not None else None
             ),
             data_classification=cfg.get("data_classification"),
+            daily_budget=(
+                float(cfg["daily_budget"]) if cfg.get("daily_budget") is not None else None
+            ),
+            application_budgets={
+                app_id: float(budget) for app_id, budget in (cfg.get("application_budgets") or {}).items()
+            },
+            monthly_budget_soft_threshold_pct=(
+                float(cfg["monthly_budget_soft_threshold_pct"])
+                if cfg.get("monthly_budget_soft_threshold_pct") is not None
+                else None
+            ),
+            priority_class=cfg.get("priority_class", "standard"),
         )
     return InMemoryPolicyStore(policies)
 
@@ -244,6 +256,16 @@ def _policy_to_item(policy: TenantPolicy) -> Dict[str, Any]:
         item["max_concurrency"] = policy.max_concurrency
     if policy.data_classification is not None:
         item["data_classification"] = policy.data_classification
+    if policy.daily_budget is not None:
+        item["daily_budget"] = Decimal(str(policy.daily_budget))
+    if policy.application_budgets:
+        item["application_budgets"] = {
+            app_id: Decimal(str(budget)) for app_id, budget in policy.application_budgets.items()
+        }
+    if policy.monthly_budget_soft_threshold_pct is not None:
+        item["monthly_budget_soft_threshold_pct"] = Decimal(str(policy.monthly_budget_soft_threshold_pct))
+    if policy.priority_class != "standard":
+        item["priority_class"] = policy.priority_class
     return item
 
 
@@ -267,6 +289,16 @@ def _item_to_policy(item: Dict[str, Any]) -> TenantPolicy:
         max_concurrency=int(item["max_concurrency"]) if "max_concurrency" in item else None,
         monthly_budget=float(item["monthly_budget"]) if "monthly_budget" in item else None,
         data_classification=item.get("data_classification"),
+        daily_budget=float(item["daily_budget"]) if "daily_budget" in item else None,
+        application_budgets={
+            app_id: float(budget) for app_id, budget in item.get("application_budgets", {}).items()
+        },
+        monthly_budget_soft_threshold_pct=(
+            float(item["monthly_budget_soft_threshold_pct"])
+            if "monthly_budget_soft_threshold_pct" in item
+            else None
+        ),
+        priority_class=item.get("priority_class", "standard"),
     )
 
 

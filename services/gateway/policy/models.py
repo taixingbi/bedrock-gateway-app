@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class TenantState(str, Enum):
@@ -76,6 +76,21 @@ class TenantPolicy:
     # value skips the check rather than guessing an ordering, see
     # routing/model_registry.py's classification_rank.
     data_classification: Optional[str] = None
+    # Plan section 34.7: cost governance beyond the existing hard
+    # monthly cap. daily_budget is a second hard cap on the same
+    # (tenant_id, day) key space usage/store.py's current_day() adds;
+    # application_budgets (app_id -> monthly cap) is per-application
+    # attribution within a tenant, the critique's own "Claims team
+    # $10k -> claims-agent $7k, summarizer $3k" example.
+    # monthly_budget_soft_threshold_pct (e.g. 0.8) crosses into a
+    # WARNING, not a block -- only the hard caps actually reject.
+    daily_budget: Optional[float] = None
+    application_budgets: Dict[str, float] = field(default_factory=dict)
+    monthly_budget_soft_threshold_pct: Optional[float] = None
+    # Plan section 34.6: logged/reported only, not enforced -- see
+    # pipeline.admission_decision's docstring for why real priority
+    # preemption isn't built yet.
+    priority_class: str = "standard"
 
 
 class UnknownTenantError(Exception):

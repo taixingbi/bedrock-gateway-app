@@ -32,7 +32,7 @@ from ..policy.cache import PolicySnapshotCache
 from ..policy.rate_limiter import TokenBucketRateLimiter
 from ..routing.model_registry import ModelRegistryEntry
 from ..telemetry.logging import get_logger, log_event
-from ..usage.store import UsageStore, current_month
+from ..usage.store import UsageStore, current_day, current_month
 from .errors import error_response as _error
 from .schemas import JobRequest, JobResponse, JobStatusResponse, Usage
 
@@ -74,11 +74,25 @@ def build_jobs_router(
             identity = _authenticate(request)
             pipeline.authorize(identity, required_role=settings.chat_required_role)
             policy = pipeline.resolve_policy(identity, policy_cache=policy_cache)
-            pipeline.enforce_kill_switch(policy)
-            pipeline.enforce_rate_limit(policy, rate_limiter=rate_limiter)
-            pipeline.enforce_budget(policy, usage_store=usage_store, month=current_month())
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        admission = pipeline.admission_decision(
+            policy, rate_limiter=rate_limiter, usage_store=usage_store,
+            month=current_month(), day=current_day(), application_id=identity.application_id,
+        )
+        if not admission.allowed:
+            exc = admission.error
+            log_event(
+                _logger, "INFO", "job submission rejected by admission control",
+                request_id=request_id, tenant_id=identity.tenant_id, stage=admission.stage, code=exc.code,
+            )
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+        if admission.warning:
+            log_event(
+                _logger, "WARNING", "budget soft warning",
+                request_id=request_id, tenant_id=identity.tenant_id, warning=admission.warning,
+            )
 
         try:
             model_id = pipeline.enforce_model_allowlist(

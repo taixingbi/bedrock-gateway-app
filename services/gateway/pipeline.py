@@ -13,6 +13,7 @@ machinery.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
 
 from .auth.aws_iam import IamTenantResolver
@@ -28,7 +29,7 @@ from .policy.cache import PolicySnapshotCache
 from .policy.models import BLOCKING_STATES, TenantPolicy, TenantState, UnknownTenantError
 from .policy.rate_limiter import TokenBucketRateLimiter
 from .routing.model_registry import ModelRegistryEntry, ModelStatus, classification_rank
-from .usage.store import UsageStore
+from .usage.store import UsageStore, get_application
 
 # THROTTLED tenants get 1/5th their configured rpm_limit rather than being
 # blocked outright -- SUSPENDED/EMERGENCY_BLOCK (the kill switch) is what
@@ -219,22 +220,123 @@ def enforce_concurrency_limit(policy: TenantPolicy, *, concurrency_limiter: Conc
         )
 
 
-def enforce_budget(policy: TenantPolicy, *, usage_store: UsageStore, month: str) -> None:
-    """Stage 4b: FinOps hard budget (M8, plan section 20). None means
-    unlimited -- most tenants don't opt in. Checked before the model is
-    ever called; the actual spend increment happens only after a
-    successful response (api/routes.py / jobs/processor.py), not here,
-    so a request that itself fails or is blocked never counts against
-    the budget it was checked against."""
-    if policy.monthly_budget is None:
-        return
-    current = usage_store.get(policy.tenant_id, month)
-    if current >= policy.monthly_budget:
-        raise PipelineError(
-            429,
-            "BUDGET_EXCEEDED",
-            f"tenant '{policy.tenant_id}' exceeded its monthly budget (${policy.monthly_budget:.2f})",
+def enforce_budget(
+    policy: TenantPolicy,
+    *,
+    usage_store: UsageStore,
+    month: str,
+    day: Optional[str] = None,
+    application_id: Optional[str] = None,
+) -> Optional[str]:
+    """Stage 4b: FinOps budget (M8, plan section 20; extended by plan
+    section 34.7). None means unlimited -- most tenants don't opt in.
+    Checked before the model is ever called; the actual spend increment
+    happens only after a successful response (api/routes.py / jobs/
+    processor.py), not here, so a request that itself fails or is
+    blocked never counts against the budget it was checked against.
+
+    Three hard caps (any exceeded -> 429 BUDGET_EXCEEDED), checked in
+    order: monthly (M8, unchanged), daily (`day`/`policy.daily_budget`
+    required together -- either omitted skips it), per-application
+    (`application_id`/`policy.application_budgets[application_id]`
+    required together). A soft *warning* (not a block) is returned --
+    not raised -- when monthly spend crosses
+    `monthly_budget_soft_threshold_pct`, same "return a string for the
+    caller to log" shape enforce_model_certification's CONDITIONAL
+    warning already uses.
+    """
+    warning: Optional[str] = None
+
+    if policy.monthly_budget is not None:
+        monthly_spend = usage_store.get(policy.tenant_id, month)
+        if monthly_spend >= policy.monthly_budget:
+            raise PipelineError(
+                429,
+                "BUDGET_EXCEEDED",
+                f"tenant '{policy.tenant_id}' exceeded its monthly budget (${policy.monthly_budget:.2f})",
+            )
+        if policy.monthly_budget_soft_threshold_pct is not None:
+            threshold = policy.monthly_budget * policy.monthly_budget_soft_threshold_pct
+            if monthly_spend >= threshold:
+                warning = (
+                    f"tenant '{policy.tenant_id}' crossed "
+                    f"{policy.monthly_budget_soft_threshold_pct:.0%} of its monthly budget "
+                    f"(${monthly_spend:.2f} / ${policy.monthly_budget:.2f})"
+                )
+
+    if policy.daily_budget is not None and day is not None:
+        daily_spend = usage_store.get(policy.tenant_id, day)
+        if daily_spend >= policy.daily_budget:
+            raise PipelineError(
+                429,
+                "DAILY_BUDGET_EXCEEDED",
+                f"tenant '{policy.tenant_id}' exceeded its daily budget (${policy.daily_budget:.2f})",
+            )
+
+    if application_id is not None and application_id in policy.application_budgets:
+        app_budget = policy.application_budgets[application_id]
+        app_spend = get_application(usage_store, policy.tenant_id, application_id, month)
+        if app_spend >= app_budget:
+            raise PipelineError(
+                429,
+                "APPLICATION_BUDGET_EXCEEDED",
+                f"application '{application_id}' (tenant '{policy.tenant_id}') exceeded its "
+                f"monthly budget (${app_budget:.2f})",
+            )
+
+    return warning
+
+
+@dataclass(frozen=True)
+class AdmissionDecision:
+    """Plan section 34.6: one reported decision covering kill-switch,
+    rate-limit, and budget admission, instead of three separate
+    raise-or-continue calls a caller has to individually catch. Does
+    NOT change enforcement behavior -- admission_decision() below
+    calls the exact same enforce_kill_switch/enforce_rate_limit/
+    enforce_budget functions, in the same order, so this is a
+    reporting wrapper, not a second enforcement path that could drift
+    from the first."""
+
+    allowed: bool
+    stage: Optional[str] = None  # "kill_switch" | "rate_limit" | "budget", None if allowed
+    error: Optional[PipelineError] = None
+    warning: Optional[str] = None  # enforce_budget's soft-threshold warning, if any
+
+
+def admission_decision(
+    policy: TenantPolicy,
+    *,
+    rate_limiter: TokenBucketRateLimiter,
+    usage_store: UsageStore,
+    month: str,
+    day: Optional[str] = None,
+    application_id: Optional[str] = None,
+) -> AdmissionDecision:
+    """Stages 3-4b run together: kill-switch, rate limit, budget (see
+    module docstring's pipeline diagram). Concurrency (stage 4c) is
+    deliberately NOT included here -- it's acquired per-blocking-call
+    around the guardrail/inference calls themselves (api/routes.py's
+    _run_blocking_limited), not upfront at admission time, since the
+    slot must be held only as long as the actual blocking work runs."""
+    try:
+        enforce_kill_switch(policy)
+    except PipelineError as exc:
+        return AdmissionDecision(allowed=False, stage="kill_switch", error=exc)
+
+    try:
+        enforce_rate_limit(policy, rate_limiter=rate_limiter)
+    except PipelineError as exc:
+        return AdmissionDecision(allowed=False, stage="rate_limit", error=exc)
+
+    try:
+        warning = enforce_budget(
+            policy, usage_store=usage_store, month=month, day=day, application_id=application_id
         )
+    except PipelineError as exc:
+        return AdmissionDecision(allowed=False, stage="budget", error=exc)
+
+    return AdmissionDecision(allowed=True, warning=warning)
 
 
 def enforce_model_allowlist(

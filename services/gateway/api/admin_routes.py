@@ -39,7 +39,7 @@ from ..policy.store import MutablePolicyStore, ProvisionedPolicyStore
 from ..policy.validation import PolicyValidationError, validate_policy_changes
 from ..routing.router import RouteSet
 from ..telemetry.logging import get_logger, log_event
-from ..usage.store import UsageStore, current_month
+from ..usage.store import UsageStore, current_day, current_month, trailing_days
 from .errors import error_response as _error
 from .schemas import (
     ProposePolicyChangeBody,
@@ -183,6 +183,58 @@ def build_admin_router(
             )
 
         return JSONResponse({"tenants": tenants})
+
+    @api_router.get("/v1/admin/usage/anomalies")
+    async def get_usage_anomalies(request: Request, threshold_multiplier: float = 3.0) -> JSONResponse:
+        """Plan section 34.7: a HEURISTIC tripwire, not ML-based anomaly
+        detection -- flags a tenant whose today's spend exceeds
+        `threshold_multiplier` times its trailing-7-day average daily
+        spend. Says so explicitly in the response body, not just this
+        docstring, so it's never mistaken for more than it is. A
+        tenant with no trailing spend at all (average == 0) is skipped
+        rather than flagged -- any nonzero spend on a brand-new tenant
+        would otherwise trivially divide-by-zero into "infinite
+        anomaly," which isn't a meaningful signal."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin_or_manager(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        tenant_ids = policy_store.list_tenant_ids()
+        if not identity.has_role(settings.admin_required_role):
+            tenant_ids = [t for t in tenant_ids if t == identity.tenant_id]
+
+        today = current_day()
+        window = trailing_days(7)
+        anomalies = []
+        for tenant_id in tenant_ids:
+            today_spend = usage_store.get(tenant_id, today)
+            trailing_spend = [usage_store.get(tenant_id, day) for day in window]
+            trailing_avg = sum(trailing_spend) / len(trailing_spend) if trailing_spend else 0.0
+            if trailing_avg <= 0:
+                continue
+            ratio = today_spend / trailing_avg
+            if ratio >= threshold_multiplier:
+                anomalies.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "today_spend": round(today_spend, 6),
+                        "trailing_7day_avg_daily_spend": round(trailing_avg, 6),
+                        "ratio": round(ratio, 2),
+                    }
+                )
+
+        return JSONResponse({
+            "method": "heuristic",
+            "note": (
+                "Threshold tripwire (today's spend >= threshold_multiplier x trailing-7-day "
+                "average), NOT ML-based anomaly detection -- plan section 34.7."
+            ),
+            "threshold_multiplier": threshold_multiplier,
+            "anomalies": anomalies,
+        })
 
     @api_router.get("/v1/admin/tenants")
     async def list_tenants(request: Request) -> JSONResponse:
