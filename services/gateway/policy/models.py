@@ -67,6 +67,15 @@ class TenantPolicy:
     # usage/store.py). None means unlimited -- most tenants don't need
     # one for a V1 MVP; budget enforcement is opt-in per tenant.
     monthly_budget: Optional[float] = None
+    # Plan section 34.4b: mirrors OnboardingRequest.data_classification
+    # (which existed for provisioning but was never carried onto the
+    # live policy) -- checked against a model's registry
+    # max_data_classification before routing (pipeline.
+    # enforce_model_certification). One of "public"/"internal"/
+    # "confidential"/"phi"/"pii" (case-insensitive); an unrecognized
+    # value skips the check rather than guessing an ordering, see
+    # routing/model_registry.py's classification_rank.
+    data_classification: Optional[str] = None
 
 
 class UnknownTenantError(Exception):

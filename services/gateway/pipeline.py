@@ -13,7 +13,7 @@ machinery.
 """
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from .auth.aws_iam import IamTenantResolver
 from .auth.enterprise_groups import EnterpriseGroupResolver
@@ -27,6 +27,7 @@ from .guardrails.models import GuardrailAction, GuardrailDecision
 from .policy.cache import PolicySnapshotCache
 from .policy.models import BLOCKING_STATES, TenantPolicy, TenantState, UnknownTenantError
 from .policy.rate_limiter import TokenBucketRateLimiter
+from .routing.model_registry import ModelRegistryEntry, ModelStatus, classification_rank
 from .usage.store import UsageStore
 
 # THROTTLED tenants get 1/5th their configured rpm_limit rather than being
@@ -257,20 +258,73 @@ def enforce_model_allowlist(
     return default_model
 
 
-def enforce_model_certification(model_id: str, *, certified_model_ids: Set[str]) -> None:
+def enforce_model_certification(
+    model_id: str,
+    *,
+    certified_model_ids: Set[str],
+    model_registry: Optional[Dict[str, ModelRegistryEntry]] = None,
+    tenant_data_classification: Optional[str] = None,
+) -> Optional[str]:
     """Stage 4c: Routing Invariant (M9, plan sections 1 and 13). A model
     that hasn't passed evaluation/certification (evals/run_eval.py,
     policies/certified_models.yaml) must never receive production
     traffic -- checked here for the primary before the router is ever
     called; routing/router.py's CertifiedRouter separately filters
     fallback candidates against the same registry, so a certified
-    primary can't fall back to an uncertified model either."""
+    primary can't fall back to an uncertified model either.
+
+    Plan section 34.5: `model_registry`, when supplied, is a second,
+    independent check -- a model can be in `certified_model_ids`
+    (passed the eval gate once) yet BLOCKED/DEPRECATED in the registry
+    (governance decided to retire it since); the registry wins. A
+    CONDITIONAL model is still allowed to route -- this returns a
+    warning string instead of raising, for the caller to log, rather
+    than silently swallowing it.
+
+    Plan section 34.4b: `tenant_data_classification`, when supplied
+    alongside a registry entry with a resolvable
+    `max_data_classification`, rejects a model whose data-handling
+    ceiling is lower than the tenant's own classification (e.g. a PHI
+    tenant routed at a model only cleared for INTERNAL data). Either
+    side being unresolvable (not in `_CLASSIFICATION_RANK`) skips this
+    check rather than guessing an ordering -- see
+    routing/model_registry.py's `classification_rank`.
+    """
     if model_id not in certified_model_ids:
         raise PipelineError(
             403,
             "MODEL_NOT_CERTIFIED",
             f"model '{model_id}' has not passed certification (see evals/run_eval.py)",
         )
+
+    if model_registry is None:
+        return None
+
+    entry = model_registry.get(model_id)
+    status = entry.status if entry is not None else ModelStatus.APPROVED
+
+    if status in (ModelStatus.BLOCKED, ModelStatus.DEPRECATED):
+        raise PipelineError(
+            403,
+            "MODEL_NOT_APPROVED",
+            f"model '{model_id}' is {status.value} in the model registry (plan section 34.5)",
+        )
+
+    if entry is not None and entry.max_data_classification is not None:
+        model_rank = classification_rank(entry.max_data_classification)
+        tenant_rank = classification_rank(tenant_data_classification)
+        if model_rank is not None and tenant_rank is not None and tenant_rank > model_rank:
+            raise PipelineError(
+                403,
+                "DATA_CLASSIFICATION_EXCEEDS_MODEL_LIMIT",
+                f"model '{model_id}' is only approved for data up to "
+                f"'{entry.max_data_classification}', tenant requires "
+                f"'{tenant_data_classification}' (plan section 34.4b)",
+            )
+
+    if status == ModelStatus.CONDITIONAL:
+        return f"model '{model_id}' is CONDITIONAL in the model registry: {entry.notes or 'no notes'}"
+    return None
 
 
 def check_input_guardrail(

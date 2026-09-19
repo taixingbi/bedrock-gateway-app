@@ -78,6 +78,12 @@ class Settings:
 
     # M9 model lifecycle -- see routing/certification.py
     certified_models_path: str
+    # Plan section 34.5 -- governance overlay, separate file/loader
+    # from certified_models.yaml (see routing/model_registry.py's
+    # module docstring for why). Empty means no overlay: every
+    # certified model is treated as APPROVED (see get_status()'s
+    # permissive default), i.e. unchanged pre-34.5 behavior.
+    model_registry_path: str
 
     # M4 gateway reliability
     route_set_config_path: str
@@ -194,6 +200,7 @@ def load_settings() -> Settings:
         tenant_policy_path=os.environ.get("TENANT_POLICY_PATH", "policies/tenants.yaml"),
         policy_cache_ttl_s=_env_float("POLICY_CACHE_TTL_S", 30.0),
         certified_models_path=os.environ.get("CERTIFIED_MODELS_PATH", "policies/certified_models.yaml"),
+        model_registry_path=os.environ.get("MODEL_REGISTRY_PATH", "policies/model_registry.yaml"),
         route_set_config_path=os.environ.get("ROUTE_SET_CONFIG_PATH", "policies/route_sets.yaml"),
         response_cache_ttl_s=_env_float("RESPONSE_CACHE_TTL_S", 60.0),
         response_cache_max_entries=_env_int("RESPONSE_CACHE_MAX_ENTRIES", 1000),

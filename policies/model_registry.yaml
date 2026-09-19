@@ -1,0 +1,94 @@
+# ============================================================
+# COPY -- not the source of truth. Canonical copy lives in
+# github.com/taixingbi/bedrock-gateway-policies (environments/dev/).
+# Sync by running scripts/sync-policies.sh against a checkout of
+# that repo. This copy exists only so `docker build` here keeps
+# working during the app/infra/policies repo split -- once the
+# gateway has a working S3/DynamoDB-backed PolicyStore, this
+# directory and the COPY step in Dockerfile go away entirely.
+# ============================================================
+# Model governance overlay (plan section 34.5). Keyed by the same
+# model_id as certified_models.yaml, deliberately a SEPARATE file --
+# certified_models.yaml is evals/run_eval.py's output (eval_pass_rate/
+# safety_score/latency/cost, re-derived by re-running the golden
+# dataset), this file is curated governance metadata (owner, risk
+# classification, lifecycle status) that a platform team edits
+# directly, never generated. A model can be in both files (the normal
+# case), only in certified_models.yaml (passed the eval gate, awaiting
+# governance sign-off -- routing/model_registry.py treats an entry
+# absent here as APPROVED by default so pre-existing certified models
+# don't silently stop working the moment this file was introduced),
+# or only here with status BLOCKED/DEPRECATED (governance retired a
+# model that once certified -- the registry wins over
+# certified_models.yaml in that case, see pipeline.enforce_model_certification).
+#
+# max_data_classification ranks PUBLIC < INTERNAL < CONFIDENTIAL <
+# PHI/PII (routing/model_registry.py's _CLASSIFICATION_RANK) -- a
+# tenant whose TenantPolicy.data_classification outranks a model's
+# max_data_classification is rejected before routing (plan section
+# 34.4b). Omitted means "no restriction," same "absence is permissive"
+# default the rest of this file uses.
+
+model_registry:
+  us.amazon.nova-micro-v1:0:
+    status: APPROVED
+    owner: platform-ml-team
+    risk_classification: LOW
+    approved_use_cases: [chat, summarization]
+    region: us-east-1
+    max_data_classification: CONFIDENTIAL
+    model_version: "1.0"
+
+  us.amazon.nova-lite-v1:0:
+    status: APPROVED
+    owner: platform-ml-team
+    risk_classification: LOW
+    approved_use_cases: [chat, summarization, classification]
+    region: us-east-1
+    max_data_classification: CONFIDENTIAL
+    model_version: "1.0"
+
+  us.amazon.nova-pro-v1:0:
+    status: APPROVED
+    owner: platform-ml-team
+    risk_classification: MODERATE
+    approved_use_cases: [chat, summarization, classification, reasoning]
+    region: us-east-1
+    max_data_classification: PHI
+    model_version: "1.0"
+
+  us.meta.llama3-3-70b-instruct-v1:0:
+    status: CONDITIONAL
+    owner: platform-ml-team
+    risk_classification: MODERATE
+    approved_use_cases: [chat]
+    region: us-east-1
+    max_data_classification: INTERNAL
+    model_version: "3.3"
+    notes: >-
+      CONDITIONAL pending a data-residency review -- third-party model
+      weights, not an AWS first-party model like the Nova family.
+      Allowed to route today (CONDITIONAL is a warning, not a block)
+      but flagged for governance follow-up.
+
+  qwen.qwen3-32b-v1:0:
+    status: CONDITIONAL
+    owner: platform-ml-team
+    risk_classification: MODERATE
+    approved_use_cases: [chat]
+    region: us-east-1
+    max_data_classification: INTERNAL
+    model_version: "3.0"
+    notes: "Same third-party-weights review as llama3-3-70b."
+
+  us.deepseek.r1-v1:0:
+    status: BLOCKED
+    owner: platform-ml-team
+    risk_classification: HIGH
+    approved_use_cases: []
+    max_data_classification: PUBLIC
+    notes: >-
+      Never certified (see route_sets.yaml/certified_models.yaml's own
+      notes -- reasoning-only output, doesn't fit the current eval
+      harness) -- BLOCKED here as the explicit governance record of
+      why, not just "absent."

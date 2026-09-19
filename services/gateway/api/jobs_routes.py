@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
@@ -30,6 +30,7 @@ from ..jobs.queue import JobQueue
 from ..jobs.store import JobStore
 from ..policy.cache import PolicySnapshotCache
 from ..policy.rate_limiter import TokenBucketRateLimiter
+from ..routing.model_registry import ModelRegistryEntry
 from ..telemetry.logging import get_logger, log_event
 from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
@@ -51,6 +52,7 @@ def build_jobs_router(
     usage_store: UsageStore,
     certified_model_ids: Set[str],
     enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
+    model_registry: Optional[Dict[str, ModelRegistryEntry]] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -82,7 +84,16 @@ def build_jobs_router(
             model_id = pipeline.enforce_model_allowlist(
                 policy, requested_model=job_request.model, default_model=settings.bedrock_model_id
             )
-            pipeline.enforce_model_certification(model_id, certified_model_ids=certified_model_ids)
+            governance_warning = pipeline.enforce_model_certification(
+                model_id, certified_model_ids=certified_model_ids,
+                model_registry=model_registry, tenant_data_classification=policy.data_classification,
+            )
+            if governance_warning:
+                log_event(
+                    _logger, "WARNING", "model governance warning",
+                    request_id=request_id, tenant_id=identity.tenant_id, model=model_id,
+                    warning=governance_warning,
+                )
         except pipeline.PipelineError as exc:
             return _error(exc.status_code, exc.code, str(exc), request_id)
 

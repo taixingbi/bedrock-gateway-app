@@ -57,6 +57,7 @@ from .policy.store import (
 )
 from .routing.certification import certified_model_ids as _certified_model_ids_from
 from .routing.certification import load_certified_models_from_yaml
+from .routing.model_registry import ModelRegistryEntry, load_model_registry_from_yaml
 from .routing.circuit_breaker import CircuitBreaker
 from .routing.router import CertifiedRouter, RouteSet, load_route_sets_from_yaml
 from .telemetry.debug_capture import DebugCaptureStore, S3AuditStore
@@ -109,6 +110,7 @@ def create_app(
     iam_tenant_resolver_primary: Optional[ProvisionedIamTenantResolver] = None,
     policy_change_store: Optional[PolicyChangeStore] = None,
     enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
+    model_registry: Optional[Dict[str, ModelRegistryEntry]] = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(
@@ -202,6 +204,8 @@ def create_app(
         certified_model_ids = _certified_model_ids_from(
             load_certified_models_from_yaml(settings.certified_models_path)
         )
+    if model_registry is None:
+        model_registry = load_model_registry_from_yaml(settings.model_registry_path)
 
     policy_cache = PolicySnapshotCache(store=policy_store, ttl_s=settings.policy_cache_ttl_s)
     rate_limiter = TokenBucketRateLimiter()
@@ -279,6 +283,7 @@ def create_app(
         usage_store=usage_store,
         audit_store=audit_store,
         enterprise_group_resolver=enterprise_group_resolver,
+        model_registry=model_registry,
     )
     admin_router = build_admin_router(
         policy_store=policy_store,
@@ -306,6 +311,7 @@ def create_app(
         usage_store=usage_store,
         certified_model_ids=certified_model_ids,
         enterprise_group_resolver=enterprise_group_resolver,
+        model_registry=model_registry,
     )
     onboarding_router = build_onboarding_router(
         onboarding_store=onboarding_store,

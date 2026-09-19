@@ -27,7 +27,15 @@ _KNOWN_FIELDS = frozenset({
     "models", "rpm_limit", "guardrail_policy", "route_set", "slo",
     "allow_guardrail_bypass_on_error", "debug_capture_enabled",
     "debug_capture_retention_days", "max_concurrency", "monthly_budget",
+    "data_classification",
 })
+
+# Plan section 34.4b -- mirrors routing/model_registry.py's
+# _CLASSIFICATION_RANK; kept as a separate literal here rather than
+# imported, since validation.py's own docstring already documents this
+# file as deliberately hand-kept in sync rather than importing across
+# the store/routing boundary for one small constant.
+_KNOWN_DATA_CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "phi", "pii"})
 
 
 class PolicyValidationError(Exception):
@@ -88,6 +96,13 @@ def validate_policy_changes(changes: Dict[str, Any]) -> None:
         value = changes["monthly_budget"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise PolicyValidationError("'monthly_budget' must be a positive number")
+
+    if "data_classification" in changes:
+        value = changes["data_classification"]
+        if not isinstance(value, str) or value.strip().lower() not in _KNOWN_DATA_CLASSIFICATIONS:
+            raise PolicyValidationError(
+                f"'data_classification' must be one of {sorted(_KNOWN_DATA_CLASSIFICATIONS)}"
+            )
 
     if "slo" in changes:
         slo = changes["slo"]

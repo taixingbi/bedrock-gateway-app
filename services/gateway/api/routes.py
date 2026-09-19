@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Request
 from opentelemetry import trace
@@ -38,6 +38,7 @@ from ..inference.bedrock_client import BedrockChatMessage, BedrockInvocationErro
 from ..policy.cache import PolicySnapshotCache
 from ..policy.rate_limiter import TokenBucketRateLimiter
 from ..routing.circuit_breaker import CircuitBreaker
+from ..routing.model_registry import ModelRegistryEntry
 from ..routing.router import AllRoutesUnavailableError, CertifiedRouter
 from ..streaming import stream_chat_response
 from ..telemetry.cost import estimate_cost
@@ -79,6 +80,7 @@ def build_router(
     blocking_call_runner: BlockingCallRunner,
     audit_store: Optional[S3AuditStore] = None,
     enterprise_group_resolver: Optional[EnterpriseGroupResolver] = None,
+    model_registry: Optional[Dict[str, ModelRegistryEntry]] = None,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -140,7 +142,16 @@ def build_router(
                 model_id = pipeline.enforce_model_allowlist(
                     policy, requested_model=chat_request.model, default_model=settings.bedrock_model_id
                 )
-                pipeline.enforce_model_certification(model_id, certified_model_ids=router.certified_model_ids)
+                governance_warning = pipeline.enforce_model_certification(
+                    model_id, certified_model_ids=router.certified_model_ids,
+                    model_registry=model_registry, tenant_data_classification=policy.data_classification,
+                )
+                if governance_warning:
+                    log_event(
+                        _chat_logger, "WARNING", "model governance warning",
+                        request_id=request_id, tenant_id=identity.tenant_id, model=model_id,
+                        warning=governance_warning,
+                    )
             except pipeline.PipelineError as exc:
                 set_span_attributes(span, status=exc.status_code, error=str(exc))
                 return _error(exc.status_code, exc.code, str(exc), request_id)
