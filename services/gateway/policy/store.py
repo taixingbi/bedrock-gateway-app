@@ -20,7 +20,15 @@ import dataclasses
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Protocol
 
-from .models import TenantAlreadyExistsError, TenantPolicy, TenantSlo, TenantState, UnknownTenantError
+from .models import (
+    NoPriorPolicyVersionError,
+    PolicyEpochConflictError,
+    TenantAlreadyExistsError,
+    TenantPolicy,
+    TenantSlo,
+    TenantState,
+    UnknownTenantError,
+)
 
 
 class PolicyStore(Protocol):
@@ -54,6 +62,44 @@ class ProvisionedPolicyStore(MutablePolicyStore, Protocol):
         write), not a caller's own exists()-then-create()."""
         ...
 
+    def apply_change(self, tenant_id: str, changes: Dict[str, Any], *, expected_epoch: int) -> TenantPolicy:
+        """Plan section 33: applies a policy-change-request's approved
+        field edits on top of the current policy, bumping policy_epoch
+        and archiving the prior version to history. Raises
+        UnknownTenantError if tenant_id doesn't exist,
+        PolicyEpochConflictError if the tenant's current policy_epoch
+        != expected_epoch (an intervening write happened)."""
+        ...
+
+    def rollback(self, tenant_id: str, target_epoch: int) -> TenantPolicy:
+        """Restores the tenant's policy to what it was at target_epoch,
+        as a NEW (forward) policy_epoch, never backward -- a rollback is
+        a new write, not time travel in the primary table. Raises
+        UnknownTenantError if tenant_id doesn't exist,
+        NoPriorPolicyVersionError if target_epoch has no history entry."""
+        ...
+
+    def list_history(self, tenant_id: str) -> List[TenantPolicy]:
+        """Every past version of this tenant's policy, newest first --
+        does not include the current version (see get())."""
+        ...
+
+
+def _apply_field_changes(current: TenantPolicy, changes: Dict[str, Any]) -> TenantPolicy:
+    """Maps a plain field->value dict (as proposed via a
+    PolicyChangeRequest, plan section 33 -- validated by
+    policy/validation.py before ever reaching here) onto a new
+    TenantPolicy, bumping policy_epoch. `slo` is special-cased --
+    TenantPolicy.slo is a TenantSlo object, not a plain dict, and a
+    partial slo update should merge onto the *existing* TenantSlo
+    rather than replacing it wholesale."""
+    kwargs: Dict[str, Any] = dict(changes)
+    if "slo" in kwargs:
+        slo_changes = kwargs.pop("slo")
+        kwargs["slo"] = dataclasses.replace(current.slo, **slo_changes)
+    kwargs["policy_epoch"] = current.policy_epoch + 1
+    return dataclasses.replace(current, **kwargs)
+
 
 class InMemoryPolicyStore:
     """Backing store keyed by tenant_id. `FilePolicyStore` loads into one
@@ -64,6 +110,10 @@ class InMemoryPolicyStore:
 
     def __init__(self, policies: Dict[str, TenantPolicy]):
         self._policies = dict(policies)
+        # tenant_id -> {policy_epoch: the policy that was CURRENT at
+        # that epoch, i.e. what it looked like before the write that
+        # moved it to the next epoch}. Plan section 33's version history.
+        self._history: Dict[str, Dict[int, TenantPolicy]] = {}
 
     def create(self, policy: TenantPolicy) -> None:
         if policy.tenant_id in self._policies:
@@ -79,11 +129,42 @@ class InMemoryPolicyStore:
     def list_tenant_ids(self) -> List[str]:
         return list(self._policies.keys())
 
+    def _replace(self, tenant_id: str, updated: TenantPolicy) -> TenantPolicy:
+        """Archives the current version to history before overwriting --
+        shared by set_state/apply_change/rollback so every write is
+        historized uniformly, not just the ones added in section 33."""
+        current = self._policies[tenant_id]
+        self._history.setdefault(tenant_id, {})[current.policy_epoch] = current
+        self._policies[tenant_id] = updated
+        return updated
+
     def set_state(self, tenant_id: str, state: TenantState) -> TenantPolicy:
         current = self.get(tenant_id)
         updated = dataclasses.replace(current, state=state, policy_epoch=current.policy_epoch + 1)
-        self._policies[tenant_id] = updated
-        return updated
+        return self._replace(tenant_id, updated)
+
+    def apply_change(self, tenant_id: str, changes: Dict[str, Any], *, expected_epoch: int) -> TenantPolicy:
+        current = self.get(tenant_id)
+        if current.policy_epoch != expected_epoch:
+            raise PolicyEpochConflictError(
+                tenant_id, expected_epoch=expected_epoch, actual_epoch=current.policy_epoch
+            )
+        updated = _apply_field_changes(current, changes)
+        return self._replace(tenant_id, updated)
+
+    def rollback(self, tenant_id: str, target_epoch: int) -> TenantPolicy:
+        current = self.get(tenant_id)
+        history = self._history.get(tenant_id, {})
+        if target_epoch not in history:
+            raise NoPriorPolicyVersionError(tenant_id, target_epoch=target_epoch)
+        target = history[target_epoch]
+        updated = dataclasses.replace(target, policy_epoch=current.policy_epoch + 1)
+        return self._replace(tenant_id, updated)
+
+    def list_history(self, tenant_id: str) -> List[TenantPolicy]:
+        self.get(tenant_id)  # raises UnknownTenantError if unknown
+        history = self._history.get(tenant_id, {})
+        return sorted(history.values(), key=lambda p: p.policy_epoch, reverse=True)
 
 
 def load_policies_from_yaml(path: str) -> InMemoryPolicyStore:
@@ -201,10 +282,25 @@ class DynamoDbPolicyStore:
     `FilePolicyStore` has always been standing in for.
     """
 
-    def __init__(self, *, table_name: str, region: str):
+    def __init__(self, *, table_name: str, region: str, history_table_name: Optional[str] = None):
         import boto3
 
         self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
+        # Plan section 33: optional -- a deployment that hasn't yet
+        # applied the Terraform for the history table can still run
+        # with apply_change()/set_state() working, just without
+        # rollback/list_history (archival becomes a no-op below).
+        self._history_table = (
+            boto3.resource("dynamodb", region_name=region).Table(history_table_name)
+            if history_table_name
+            else None
+        )
+
+    def _archive(self, current: TenantPolicy) -> None:
+        if self._history_table is None:
+            return
+        item = _policy_to_item(current)
+        self._history_table.put_item(Item=item)
 
     def create(self, policy: TenantPolicy) -> None:
         """Provisioning-only: fails if tenant_id already has a row here,
@@ -245,8 +341,76 @@ class DynamoDbPolicyStore:
     def set_state(self, tenant_id: str, state: TenantState) -> TenantPolicy:
         current = self.get(tenant_id)
         updated = dataclasses.replace(current, state=state, policy_epoch=current.policy_epoch + 1)
+        self._archive(current)
         self._table.put_item(Item=_policy_to_item(updated))
         return updated
+
+    def apply_change(self, tenant_id: str, changes: Dict[str, Any], *, expected_epoch: int) -> TenantPolicy:
+        from botocore.exceptions import ClientError
+
+        current = self.get(tenant_id)
+        if current.policy_epoch != expected_epoch:
+            raise PolicyEpochConflictError(
+                tenant_id, expected_epoch=expected_epoch, actual_epoch=current.policy_epoch
+            )
+        updated = _apply_field_changes(current, changes)
+        self._archive(current)
+        try:
+            # Conditional write against the DB's own current epoch, not
+            # just the in-memory `current` fetched above -- closes the
+            # TOCTOU window between get() and put_item() under
+            # concurrent approvals of two change requests for the same
+            # tenant (the same class of race PolicyEpochConflictError
+            # exists to catch, enforced here as a real DynamoDB
+            # condition rather than only a Python-level check).
+            self._table.put_item(
+                Item=_policy_to_item(updated),
+                ConditionExpression="policy_epoch = :expected",
+                ExpressionAttributeValues={":expected": expected_epoch},
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                actual = self.get(tenant_id)
+                raise PolicyEpochConflictError(
+                    tenant_id, expected_epoch=expected_epoch, actual_epoch=actual.policy_epoch
+                ) from exc
+            raise
+        return updated
+
+    def rollback(self, tenant_id: str, target_epoch: int) -> TenantPolicy:
+        if self._history_table is None:
+            raise NoPriorPolicyVersionError(tenant_id, target_epoch=target_epoch)
+        current = self.get(tenant_id)
+        response = self._history_table.get_item(
+            Key={"tenant_id": tenant_id, "policy_epoch": target_epoch}
+        )
+        item = response.get("Item")
+        if item is None:
+            raise NoPriorPolicyVersionError(tenant_id, target_epoch=target_epoch)
+        target = _item_to_policy(item)
+        updated = dataclasses.replace(target, policy_epoch=current.policy_epoch + 1)
+        self._archive(current)
+        self._table.put_item(Item=_policy_to_item(updated))
+        return updated
+
+    def list_history(self, tenant_id: str) -> List[TenantPolicy]:
+        from boto3.dynamodb.conditions import Key
+
+        self.get(tenant_id)  # raises UnknownTenantError if unknown
+        if self._history_table is None:
+            return []
+        items: List[Dict[str, Any]] = []
+        kwargs: Dict[str, Any] = {
+            "KeyConditionExpression": Key("tenant_id").eq(tenant_id),
+            "ScanIndexForward": False,  # newest (highest policy_epoch) first
+        }
+        while True:
+            response = self._history_table.query(**kwargs)
+            items.extend(response.get("Items", []))
+            if "LastEvaluatedKey" not in response:
+                break
+            kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+        return [_item_to_policy(item) for item in items]
 
 
 class LayeredPolicyStore:

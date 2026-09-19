@@ -84,3 +84,30 @@ class TenantAlreadyExistsError(Exception):
     def __init__(self, tenant_id: str):
         super().__init__(f"tenant_id={tenant_id!r} is already provisioned")
         self.tenant_id = tenant_id
+
+
+class PolicyEpochConflictError(Exception):
+    """Plan section 33: raised by ProvisionedPolicyStore.apply_change()/
+    rollback() when the tenant's current policy_epoch doesn't match the
+    epoch the caller expected -- another write landed in between.
+    Applying on top of a stale expectation would silently clobber that
+    other write, so this is a hard stop, not a warning."""
+
+    def __init__(self, tenant_id: str, *, expected_epoch: int, actual_epoch: int):
+        super().__init__(
+            f"tenant '{tenant_id}' policy_epoch is {actual_epoch}, not the expected {expected_epoch}"
+        )
+        self.tenant_id = tenant_id
+        self.expected_epoch = expected_epoch
+        self.actual_epoch = actual_epoch
+
+
+class NoPriorPolicyVersionError(Exception):
+    """Plan section 33: raised by rollback() when target_epoch has no
+    corresponding history entry -- either it never existed, or it's the
+    tenant's current epoch (nothing to roll back to)."""
+
+    def __init__(self, tenant_id: str, *, target_epoch: int):
+        super().__init__(f"tenant '{tenant_id}' has no policy history for epoch {target_epoch}")
+        self.tenant_id = tenant_id
+        self.target_epoch = target_epoch

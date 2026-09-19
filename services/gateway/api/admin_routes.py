@@ -19,14 +19,33 @@ from ..auth import aws_iam
 from ..auth.aws_iam import IamTenantResolver
 from ..auth.jwt_verifier import TokenVerifier
 from ..config import Settings
+from ..onboarding.audit import AuditEvent, AuditStore
 from ..policy.cache import PolicySnapshotCache
-from ..policy.models import TenantState, UnknownTenantError
-from ..policy.store import MutablePolicyStore
+from ..policy.change_requests import (
+    PolicyChangeNotFoundError,
+    PolicyChangeRequest,
+    PolicyChangeStatus,
+    PolicyChangeStore,
+    new_change_id,
+)
+from ..policy.models import (
+    NoPriorPolicyVersionError,
+    PolicyEpochConflictError,
+    TenantState,
+    UnknownTenantError,
+)
+from ..policy.store import MutablePolicyStore, ProvisionedPolicyStore
+from ..policy.validation import PolicyValidationError, validate_policy_changes
 from ..routing.router import RouteSet
 from ..telemetry.logging import get_logger, log_event
 from ..usage.store import UsageStore, current_month
 from .errors import error_response as _error
-from .schemas import SetTenantStateBody
+from .schemas import (
+    ProposePolicyChangeBody,
+    RejectPolicyChangeBody,
+    RollbackPolicyBody,
+    SetTenantStateBody,
+)
 
 _logger = get_logger("gateway.admin")
 
@@ -41,6 +60,9 @@ def build_admin_router(
     usage_store: UsageStore,
     route_sets: Dict[str, RouteSet],
     certified_model_ids: Set[str],
+    policy_store_primary: ProvisionedPolicyStore,
+    policy_change_store: PolicyChangeStore,
+    audit_store: AuditStore,
 ) -> APIRouter:
     api_router = APIRouter()
 
@@ -249,4 +271,240 @@ def build_admin_router(
             "note": "AWS_IAM/SigV4 auth path only -- the JWT path has no application registry to list",
         })
 
+    @api_router.post("/v1/admin/tenants/{tenant_id}/policy-changes")
+    async def propose_policy_change(
+        tenant_id: str, body: ProposePolicyChangeBody, request: Request
+    ) -> JSONResponse:
+        """Plan section 33: a manager (or admin) proposes an edit to an
+        already-provisioned tenant's policy -- rpm_limit/models/budget/
+        etc. -- without touching a YAML file or redeploying the gateway.
+        Only reaches the *primary* (provisioned/DynamoDB) store: a
+        file-managed tenant's policy changes still go through a YAML PR,
+        same invariant onboarding/provisioning.py enforces for creation."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin_or_manager(request)
+            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        try:
+            validate_policy_changes(body.changes)
+        except PolicyValidationError as exc:
+            return _error(400, "INVALID_POLICY_CHANGE", str(exc), request_id)
+
+        try:
+            policy_store_primary.get(tenant_id)
+        except UnknownTenantError as exc:
+            return _error(404, "TENANT_NOT_FOUND", str(exc), request_id)
+
+        change = PolicyChangeRequest(
+            change_id=new_change_id(),
+            tenant_id=tenant_id,
+            changes=body.changes,
+            base_policy_epoch=body.base_policy_epoch,
+            requested_by=identity.sub,
+        )
+        policy_change_store.put(change)
+        audit_store.record(
+            AuditEvent(request_id=change.change_id, event="POLICY_CHANGE_PROPOSED", actor=identity.sub)
+        )
+
+        log_event(
+            _logger, "INFO", "policy change proposed",
+            request_id=request_id, change_id=change.change_id, tenant_id=tenant_id, actor=identity.sub,
+        )
+
+        return JSONResponse(_serialize_change(change), status_code=201)
+
+    @api_router.get("/v1/admin/tenants/{tenant_id}/policy-changes")
+    async def list_policy_changes(tenant_id: str, request: Request) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin_or_manager(request)
+            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        changes = policy_change_store.list_for_tenant(tenant_id)
+        return JSONResponse({"changes": [_serialize_change(c) for c in changes]})
+
+    @api_router.post("/v1/admin/tenants/{tenant_id}/policy-changes/{change_id}/approve")
+    async def approve_policy_change(tenant_id: str, change_id: str, request: Request) -> JSONResponse:
+        """Admin-only, same role tier as onboarding's approve -- a
+        manager may *propose* a change to their own tenant but never
+        approve their own or anyone else's (separation of duties)."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        try:
+            found = policy_change_store.get(change_id)
+        except PolicyChangeNotFoundError as exc:
+            return _error(404, exc.code, str(exc), request_id)
+        if found.tenant_id != tenant_id:
+            return _error(404, "POLICY_CHANGE_NOT_FOUND", f"policy change '{change_id}' not found", request_id)
+        if found.status != PolicyChangeStatus.PENDING_APPROVAL:
+            return _error(
+                409, "INVALID_POLICY_CHANGE_TRANSITION",
+                f"policy change '{change_id}' is {found.status.value}, not PENDING_APPROVAL",
+                request_id,
+            )
+
+        try:
+            updated_policy = policy_store_primary.apply_change(
+                tenant_id, found.changes, expected_epoch=found.base_policy_epoch
+            )
+        except PolicyEpochConflictError as exc:
+            return _error(409, "POLICY_EPOCH_CONFLICT", str(exc), request_id)
+
+        applied = _with_change_status(found, PolicyChangeStatus.APPLIED, approved_by=identity.sub)
+        policy_change_store.put(applied)
+        policy_cache.invalidate(tenant_id)
+        audit_store.record(
+            AuditEvent(request_id=change_id, event="POLICY_CHANGE_APPLIED", actor=identity.sub)
+        )
+
+        log_event(
+            _logger, "INFO", "policy change applied",
+            request_id=request_id, change_id=change_id, tenant_id=tenant_id,
+            actor=identity.sub, policy_epoch=updated_policy.policy_epoch,
+        )
+
+        return JSONResponse(_serialize_change(applied))
+
+    @api_router.post("/v1/admin/tenants/{tenant_id}/policy-changes/{change_id}/reject")
+    async def reject_policy_change(
+        tenant_id: str, change_id: str, body: RejectPolicyChangeBody, request: Request
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        try:
+            found = policy_change_store.get(change_id)
+        except PolicyChangeNotFoundError as exc:
+            return _error(404, exc.code, str(exc), request_id)
+        if found.tenant_id != tenant_id:
+            return _error(404, "POLICY_CHANGE_NOT_FOUND", f"policy change '{change_id}' not found", request_id)
+        if found.status != PolicyChangeStatus.PENDING_APPROVAL:
+            return _error(
+                409, "INVALID_POLICY_CHANGE_TRANSITION",
+                f"policy change '{change_id}' is {found.status.value}, not PENDING_APPROVAL",
+                request_id,
+            )
+
+        rejected = _with_change_status(
+            found, PolicyChangeStatus.REJECTED, approved_by=identity.sub, reason=body.reason
+        )
+        policy_change_store.put(rejected)
+        audit_store.record(
+            AuditEvent(request_id=change_id, event="POLICY_CHANGE_REJECTED", actor=identity.sub, reason=body.reason)
+        )
+
+        return JSONResponse(_serialize_change(rejected))
+
+    @api_router.post("/v1/admin/tenants/{tenant_id}/rollback")
+    async def rollback_policy(tenant_id: str, body: RollbackPolicyBody, request: Request) -> JSONResponse:
+        """Admin-only: restores a prior policy version as a new forward
+        epoch (plan section 33) -- never rewrites history in place."""
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin(request)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        try:
+            updated = policy_store_primary.rollback(tenant_id, body.target_epoch)
+        except UnknownTenantError as exc:
+            return _error(404, "TENANT_NOT_FOUND", str(exc), request_id)
+        except NoPriorPolicyVersionError as exc:
+            return _error(404, "NO_PRIOR_POLICY_VERSION", str(exc), request_id)
+
+        policy_cache.invalidate(tenant_id)
+        audit_store.record(
+            AuditEvent(
+                request_id=f"rollback-{tenant_id}-{updated.policy_epoch}",
+                event="POLICY_ROLLED_BACK", actor=identity.sub,
+                reason=f"restored to epoch {body.target_epoch}",
+            )
+        )
+
+        log_event(
+            _logger, "INFO", "policy rolled back",
+            request_id=request_id, tenant_id=tenant_id, actor=identity.sub,
+            target_epoch=body.target_epoch, new_policy_epoch=updated.policy_epoch,
+        )
+
+        return JSONResponse({"tenant_id": tenant_id, "policy_epoch": updated.policy_epoch})
+
+    @api_router.get("/v1/admin/tenants/{tenant_id}/policy-history")
+    async def get_policy_history(tenant_id: str, request: Request) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+        try:
+            identity = _authenticate_admin_or_manager(request)
+            pipeline.authorize_tenant_match(identity, tenant_id, override_role=settings.admin_required_role)
+        except pipeline.PipelineError as exc:
+            return _error(exc.status_code, exc.code, str(exc), request_id)
+
+        try:
+            history = policy_store_primary.list_history(tenant_id)
+        except UnknownTenantError as exc:
+            return _error(404, "TENANT_NOT_FOUND", str(exc), request_id)
+
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "history": [
+                {
+                    "policy_epoch": p.policy_epoch,
+                    "state": p.state.value,
+                    "models": p.models,
+                    "rpm_limit": p.rpm_limit,
+                    "guardrail_policy": p.guardrail_policy,
+                    "route_set": p.route_set,
+                    "monthly_budget": p.monthly_budget,
+                    "max_concurrency": p.max_concurrency,
+                }
+                for p in history
+            ],
+        })
+
     return api_router
+
+
+def _with_change_status(
+    change: PolicyChangeRequest,
+    status: PolicyChangeStatus,
+    *,
+    approved_by: str,
+    reason: "str | None" = None,
+) -> PolicyChangeRequest:
+    import dataclasses
+    import time
+
+    return dataclasses.replace(change, status=status, approved_by=approved_by, reason=reason, updated_at=time.time())
+
+
+def _serialize_change(change: PolicyChangeRequest) -> dict:
+    return {
+        "change_id": change.change_id,
+        "tenant_id": change.tenant_id,
+        "changes": change.changes,
+        "base_policy_epoch": change.base_policy_epoch,
+        "requested_by": change.requested_by,
+        "status": change.status.value,
+        "reason": change.reason,
+        "approved_by": change.approved_by,
+        "created_at": change.created_at,
+        "updated_at": change.updated_at,
+    }

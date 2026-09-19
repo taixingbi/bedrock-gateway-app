@@ -130,6 +130,16 @@ class Settings:
     provisioned_tenant_policies_table_name: str
     provisioned_principal_mappings_table_name: str
 
+    # Plan section 33 -- policy versioning/approval/rollback. Both empty
+    # means DynamoDbPolicyStore.apply_change() still works (in-memory
+    # history via InMemoryPolicyStore, or no history at all if
+    # provisioned_tenant_policies_table_name is also unset) but
+    # rollback()/list_history() on the Dynamo path degrade to "nothing
+    # to roll back to" rather than erroring -- see store.py's
+    # DynamoDbPolicyStore._archive().
+    policy_change_requests_table_name: str
+    provisioned_tenant_policies_history_table_name: str
+
     # M12 (plan.md Section 5) -- empty means resolve AWS_IAM principals
     # in-process (LayeredIamTenantResolver, unchanged default); set
     # means delegate to platform-authz-service instead
@@ -198,6 +208,10 @@ def load_settings() -> Settings:
         onboarding_requests_table_name=os.environ.get("ONBOARDING_REQUESTS_TABLE_NAME", ""),
         onboarding_audit_table_name=os.environ.get("ONBOARDING_AUDIT_TABLE_NAME", ""),
         provisioned_tenant_policies_table_name=os.environ.get("PROVISIONED_TENANT_POLICIES_TABLE_NAME", ""),
+        policy_change_requests_table_name=os.environ.get("POLICY_CHANGE_REQUESTS_TABLE_NAME", ""),
+        provisioned_tenant_policies_history_table_name=os.environ.get(
+            "PROVISIONED_TENANT_POLICIES_HISTORY_TABLE_NAME", ""
+        ),
         provisioned_principal_mappings_table_name=os.environ.get(
             "PROVISIONED_PRINCIPAL_MAPPINGS_TABLE_NAME", ""
         ),

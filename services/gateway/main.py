@@ -44,6 +44,7 @@ from .jobs.store import DynamoDbJobStore, InMemoryJobStore, JobStore
 from .onboarding.audit import AuditStore, DynamoDbAuditStore, InMemoryAuditStore
 from .onboarding.store import DynamoDbOnboardingStore, InMemoryOnboardingStore, OnboardingStore
 from .policy.cache import PolicySnapshotCache
+from .policy.change_requests import DynamoDbPolicyChangeStore, InMemoryPolicyChangeStore, PolicyChangeStore
 from .policy.rate_limiter import TokenBucketRateLimiter
 from .policy.store import (
     DynamoDbPolicyStore,
@@ -105,6 +106,7 @@ def create_app(
     onboarding_audit_store: Optional[AuditStore] = None,
     policy_store_primary: Optional[ProvisionedPolicyStore] = None,
     iam_tenant_resolver_primary: Optional[ProvisionedIamTenantResolver] = None,
+    policy_change_store: Optional[PolicyChangeStore] = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     configure_logging(
@@ -133,7 +135,9 @@ def create_app(
     if policy_store_primary is None:
         policy_store_primary = (
             DynamoDbPolicyStore(
-                table_name=settings.provisioned_tenant_policies_table_name, region=settings.aws_region
+                table_name=settings.provisioned_tenant_policies_table_name,
+                region=settings.aws_region,
+                history_table_name=settings.provisioned_tenant_policies_history_table_name or None,
             )
             if settings.provisioned_tenant_policies_table_name
             else InMemoryPolicyStore({})
@@ -243,6 +247,16 @@ def create_app(
             if settings.onboarding_audit_table_name
             else InMemoryAuditStore()
         )
+    if policy_change_store is None:
+        # Reuses the onboarding audit table's DynamoDbAuditStore shape
+        # for its own event trail (see admin_routes.py's AuditEvent
+        # calls keyed by change_id) -- this is a separate table, just
+        # the same generic "who/what/when" store, not shared state.
+        policy_change_store = (
+            DynamoDbPolicyChangeStore(table_name=settings.policy_change_requests_table_name, region=settings.aws_region)
+            if settings.policy_change_requests_table_name
+            else InMemoryPolicyChangeStore()
+        )
 
     router_ = build_router(
         router=router,
@@ -270,6 +284,9 @@ def create_app(
         usage_store=usage_store,
         route_sets=route_sets,
         certified_model_ids=certified_model_ids,
+        policy_store_primary=policy_store_primary,
+        policy_change_store=policy_change_store,
+        audit_store=onboarding_audit_store,
     )
     jobs_router = build_jobs_router(
         settings=settings,

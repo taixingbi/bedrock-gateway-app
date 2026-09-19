@@ -7,7 +7,7 @@ M1/M2/M3 without breaking this contract.
 """
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -130,3 +130,23 @@ class OnboardingRequestBody(BaseModel):
 
 class RejectOnboardingRequestBody(BaseModel):
     reason: str = Field(min_length=1)
+
+
+class ProposePolicyChangeBody(BaseModel):
+    """POST /v1/admin/tenants/{tenant_id}/policy-changes (plan section
+    33). `changes` is a plain field->value map, not a full TenantPolicy
+    -- see change_requests.py's PolicyChangeRequest docstring. Field-level
+    validation happens in policy/validation.py, not here, since the set
+    of legal fields/ranges belongs with TenantPolicy, not the transport
+    layer."""
+
+    changes: Dict[str, Any] = Field(min_length=1)
+    base_policy_epoch: int = Field(ge=1)
+
+
+class RejectPolicyChangeBody(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+class RollbackPolicyBody(BaseModel):
+    target_epoch: int = Field(ge=1)
